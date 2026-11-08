@@ -1,0 +1,20 @@
+# 本机配置（从 *.example 复制）
+config/branches.conf
+config/images.conf
+config/settings.env
+
+# 运行时生成的目录
+repos/
+worktrees/
+caches/
+results/
+logs/
+state/
+
+# 私有数据和杂项
+data/
+_to_delete/
+.DS_Store
+__pycache__/
+*.pyc
+*.bak

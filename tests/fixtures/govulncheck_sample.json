@@ -1,0 +1,17 @@
+{"config":{"protocol_version":"v1.0.0","scanner_name":"govulncheck","scan_level":"symbol"}}
+{"progress":{"message":"Scanning your code..."}}
+{"osv":{"id":"GO-2023-2102","aliases":["CVE-2023-44487","GHSA-4374-p667-p6c8"],"summary":"HTTP/2 rapid reset"}}
+{"osv":{"id":"GO-2023-1571","aliases":["CVE-2022-41723","GHSA-vvpx-j8f3-3w6h"],"summary":"HPACK"}}
+{"osv":{"id":"GO-2023-2185","aliases":["CVE-2023-45283"],"summary":"filepath"}}
+{
+  "finding": {
+    "osv": "GO-2023-2102",
+    "fixed_version": "v0.17.0",
+    "trace": [
+      {"module": "golang.org/x/net", "version": "v0.10.0", "package": "golang.org/x/net/http2", "function": "Server.ServeConn"},
+      {"module": "example.com/app", "package": "example.com/app", "function": "main"}
+    ]
+  }
+}
+{"finding":{"osv":"GO-2023-1571","trace":[{"module":"golang.org/x/net","version":"v0.10.0"}]}}
+{"finding":{"osv":"GO-2023-2185","trace":[{"module":"stdlib","version":"v1.21.5","package":"path/filepath"}]}}

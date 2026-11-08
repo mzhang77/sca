@@ -1,0 +1,9 @@
+# 要扫的交付镜像。一行一个：  名称  镜像  对应 branches.conf 的名称（用来和源码比较）
+# 使用前复制一份：cp config/images.conf.example config/images.conf，再按需修改（images.conf 不进 git）。
+# - 下面用的是公开发布的镜像，换成你实际交付的镜像 tag 即可
+# - TiDB Dashboard 嵌在 PD 里，不单独扫；BR 和 TiDB 同一个仓库/分支
+tidb    docker.io/pingcap/tidb:v8.5.8     tidb
+br      docker.io/pingcap/br:v8.5.8       tidb
+tikv    docker.io/pingcap/tikv:v8.5.8     tikv
+pd      docker.io/pingcap/pd:v8.5.8       pd
+ticdc   docker.io/pingcap/ticdc:v8.5.8    ticdc

@@ -1,0 +1,14 @@
+# 被跟踪的分支。一行一个：  名称  仓库URL  分支
+# 使用前复制一份：cp config/branches.conf.example config/branches.conf，再按需修改（branches.conf 不进 git）。
+# - 名称在本文件内唯一（用作 results/ 下的目录名，也被 images.conf 的第三列引用）；以 # 开头的行和空行会被忽略
+# - 增删分支只需改这个文件；删除一行不会删除已有的 worktree/结果
+# - 下面用的是公开的 release 分支，换成你要跟踪的分支即可（TiDB 与 BR 在同一个仓库）
+tidb             https://github.com/pingcap/tidb.git              release-8.5
+tikv             https://github.com/tikv/tikv.git                 release-8.5
+pd               https://github.com/tikv/pd.git                   release-8.5
+ticdc            https://github.com/pingcap/ticdc.git             release-8.5
+tidb-operator    https://github.com/pingcap/tidb-operator.git     release-1.6
+kvproto          https://github.com/pingcap/kvproto.git           release-8.5
+tidb-dashboard   https://github.com/pingcap/tidb-dashboard.git    release-8.5
+ng-monitoring    https://github.com/pingcap/ng-monitoring.git     release-8.5
+client-go        https://github.com/tikv/client-go.git            tidb-8.5

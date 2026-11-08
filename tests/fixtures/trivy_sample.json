@@ -1,0 +1,40 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "docker.io/pingcap/pd:v8.5.7-20261001-abc1234",
+  "ArtifactType": "container_image",
+  "Metadata": {
+    "OS": {"Family": "rocky", "Name": "9.4"},
+    "RepoDigests": ["pingcap/pd@sha256:0123"],
+    "ImageConfig": {"created": "2026-10-01T10:00:00Z"}
+  },
+  "Results": [
+    {"Target": "docker.io/pingcap/pd (rocky 9.4)", "Class": "os-pkgs", "Type": "rocky",
+     "Vulnerabilities": [
+       {"VulnerabilityID": "CVE-2026-1111", "PkgName": "openssl-libs", "InstalledVersion": "1:3.0.7-27.el9",
+        "FixedVersion": "1:3.0.7-28.el9_4", "Severity": "HIGH", "SeveritySource": "rocky",
+        "CVSS": {"nvd": {"V3Score": 7.5}}, "PublishedDate": "2026-10-20T00:00:00Z", "Title": "openssl: something"}
+     ]},
+    {"Target": "pd-server", "Class": "lang-pkgs", "Type": "gobinary",
+     "Packages": [{"Name": "github.com/tikv/pd", "Version": "", "Relationship": "root"}],
+     "Vulnerabilities": [
+       {"VulnerabilityID": "CVE-2026-78659", "PkgName": "golang.org/x/net", "InstalledVersion": "v0.48.0",
+        "FixedVersion": "0.60.0", "Severity": "HIGH", "CVSS": {"nvd": {"V3Score": 7.5}}, "PublishedDate": "2026-10-08T00:00:00Z"},
+       {"VulnerabilityID": "CVE-2026-56855", "PkgName": "golang.org/x/crypto", "InstalledVersion": "v0.52.0",
+        "FixedVersion": "0.56.0", "Severity": "HIGH", "PublishedDate": "2026-09-02T00:00:00Z"},
+       {"VulnerabilityID": "GHSA-hrxh-6v49-42gf", "PkgName": "google.golang.org/grpc", "InstalledVersion": "v1.79.3",
+        "FixedVersion": "1.82.1", "Severity": "HIGH", "CVSS": {"ghsa": {"V3Score": 8.8}}, "PublishedDate": "2026-07-01T00:00:00Z"},
+       {"VulnerabilityID": "CVE-2026-78660", "PkgName": "stdlib", "InstalledVersion": "v1.25.12",
+        "FixedVersion": "1.26.9, 1.27.2", "Severity": "MEDIUM", "PublishedDate": "2026-10-08T00:00:00Z"},
+       {"VulnerabilityID": "CVE-2025-0001", "PkgName": "github.com/old/gone", "InstalledVersion": "v1.0.0",
+        "FixedVersion": "1.0.1", "Severity": "CRITICAL", "CVSS": {"nvd": {"V3Score": 9.8}}, "PublishedDate": "2025-01-01T00:00:00Z"},
+       {"VulnerabilityID": "CVE-2026-2222", "PkgName": "github.com/aws/aws-sdk-go", "InstalledVersion": "v1.55.7",
+        "FixedVersion": "", "Severity": "MEDIUM", "PublishedDate": "2026-05-01T00:00:00Z"}
+     ]},
+    {"Target": "pd-ctl", "Class": "lang-pkgs", "Type": "gobinary",
+     "Packages": [{"Name": "github.com/tikv/pd/tools", "Version": "", "Relationship": "root"}],
+     "Vulnerabilities": [
+       {"VulnerabilityID": "CVE-2026-78659", "PkgName": "golang.org/x/net", "InstalledVersion": "v0.48.0",
+        "FixedVersion": "0.60.0", "Severity": "HIGH", "PublishedDate": "2026-10-08T00:00:00Z"}
+     ]}
+  ]
+}
