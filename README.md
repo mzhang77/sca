@@ -47,7 +47,7 @@ bin/cleanup.sh                # 删除本地所有分支（repos/ worktrees/）�
   - CVE数：按"同一漏洞"去重（GHSA/GO/RUSTSEC 编号与 CVE 别名合并计一个）。
   - KEV：YES = 在 CISA 已知被利用漏洞目录里（优先级最高）；`?` = 本次没能获取 KEV 数据。
   - 严重程度 UNKNOWN = OSV 里还没有 CVSS 评分（新披露的 CVE 常见），**不代表低危**；汇总总览里的"未评分"列统计了这类漏洞。
-  - 可达性（仅 Go，**缺省关闭**：`config/settings.env` 里 `GOVULNCHECK_ENABLED=0`。客户扫的是镜像，商业扫描器只按版本匹配，不做可达性，所以它不影响“猜客户会报什么”；关闭时 Go 可达性一律为 unknown，“需要优先处理”只看 KEV）：called = 漏洞函数在调用链上；imported = 包被引入但漏洞函数没被调用；required = 仅模块被依赖；unknown = 没有 govulncheck 结果；n/a = 非 Go（Rust、npm 无可达性分析）。
+  - 可达性（仅 Go，**缺省关闭**：`config/settings.env` 里 `GOVULNCHECK_ENABLED=0`。客户扫的是镜像，商业扫描器只按版本匹配，不做可达性，所以缺省不跑；关闭时 Go 可达性一律为 unknown，“需要优先处理”只看 KEV）：called = 漏洞函数在调用链上；imported = 包被引入但漏洞函数没被调用；required = 仅模块被依赖；unknown = 没有 govulncheck 结果；n/a = 非 Go（Rust、npm 无可达性分析）。
   - 排序：KEV 优先，其次可达，再按 CVSS。
 
 ## 日志（logs/）
@@ -97,8 +97,7 @@ tests/                  test_sca.py（单元）  test_image_view.py（镜像，�
 某个分支在第 1 步更新失败时，它对应的镜像仍会扫描，但对比的是该分支上次的内容，日志里会有 `[WARN] ... failed in step 1`。
 - **results/report-images-latest.md**（镜像报告）：0) Go 官方近期修复命中镜像（golang.org/x/* 和标准库，近 `GO_OFFICIAL_DAYS` 天，按公布日期倒序）；1) 总览；2) 客户最可能提的（KEV，或 HIGH/CRITICAL 且有修复版本）；3) 近 N 天新公布的；
   4) 源码已修复、还没发镜像的；5) 源码也没修复的；6) 说明；最后是**附录：操作系统包**。
-- 这份报告的目的是用免费工具“猜”客户的商业扫描器会关注什么。假设客户从分支自己 build 私有镜像，OS 包来自他们自己的基础镜像，
-  所以 OS 包（需重建镜像）不计入 0-5 节和总览的任何统计，也不算“客户可能提”，只放在报告最后的附录里；单个镜像的 report.md 同样把 OS 包放在最后。
+- 这份报告假设客户从分支自己 build 私有镜像，所以 OS 包不计入统计，只列在报告最后的附录里（单个镜像的 report.md 也一样）。
 - **results/images/<名称>/<运行ID>/**：`trivy.json`（原始输出）、`report.{md,tsv,json}`。保留数量同样受 `RETENTION` 控制。
 - 源码状态：源码已修复(待发镜像) / 源码未修复 / 源码已移除该依赖 / 暂无修复版本 / 无法对比 / 需重建镜像(OS包)。
   Go 依赖按二进制的主模块找到分支里对应的 go.mod 比较（同一个镜像里有多个二进制时取最需要关注的状态）；stdlib 按 go.mod 的 toolchain/go 指令比较。
