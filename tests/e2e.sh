@@ -8,6 +8,19 @@ R="$T/root"; mkdir -p "$R/config" "$T/stubs"; cp -R "$SRC/bin" "$R/bin"
 PASS=0; FAILN=0
 check() { if eval "$2"; then PASS=$((PASS+1)); echo "  PASS  $1"; else FAILN=$((FAILN+1)); echo "  FAIL  $1"; fi; }
 
+echo "== 0. 脚本里的 \$变量 后面不能直接跟中文等非 ASCII 字符（macOS 的 bash 3.2 会把第一个字节当成变量名的一部分，要写成 \${变量}）"
+BAD="$(python3 - "$SRC/bin" <<'PY'
+import os, re, sys
+pat = re.compile(rb"\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff]")
+for f in sorted(os.listdir(sys.argv[1])):
+    if f.endswith(".sh"):
+        for n, line in enumerate(open(os.path.join(sys.argv[1], f), "rb"), 1):
+            if not line.lstrip().startswith(b"#") and pat.search(line):
+                print("%s:%d" % (f, n))
+PY
+)"
+check "bin/*.sh 没有 \$变量紧跟非 ASCII 字符${BAD:+（$BAD）}" '[ -z "$BAD" ]'
+
 # ---- 桩工具 ----
 cat > "$T/stubs/osv-scanner" <<'S'
 #!/bin/sh
@@ -17,7 +30,17 @@ sed "s#/WT#$last#g" "$STUB_OSV_FILE"
 exit 1
 S
 printf '#!/bin/sh\necho "$GOCACHE|$GOMODCACHE" > "%s/gov.env"\ncat "$STUB_GOV_FILE"\n' "$T" > "$T/stubs/govulncheck"
-printf '#!/bin/sh\nexit 0\n' > "$T/stubs/go"
+cat > "$T/stubs/go" <<S
+#!/bin/sh
+# 桩 go：build 时按 -o 生成空文件并记录环境；其他子命令什么都不做
+case "\$1" in
+  build) for a in "\$@"; do case "\$prev" in -o) out="\$a";; esac; prev="\$a"; done
+         [ -n "\$STUB_GO_FAIL" ] && { echo "pkg/x.go:1: compile error" >&2; exit 1; }
+         echo "\$GOOS/\$GOARCH CGO=\$CGO_ENABLED TC=\$GOTOOLCHAIN \$*" >> "$T/go.args"; : > "\$out";;
+  version) echo "\$2: go1.27.3";;
+esac
+exit 0
+S
 printf '#!/bin/sh\necho "$@" > "%s/caff.args"\nexit 0\n' "$T" > "$T/stubs/caffeinate"
 chmod +x "$T/stubs/"*
 cp "$HERE/fixtures/kev_sample.json" "$T/kev.json"
@@ -150,15 +173,17 @@ cat > "$T/stubs/trivy" <<'S'
 #!/bin/sh
 [ "$1" = "--version" ] && { echo "Version: 0.0.stub"; exit 0; }
 for a in "$@"; do case "$prev" in --output) out="$a";; esac; prev="$a"; done
+[ -n "$STUB_TRIVY_ARGS" ] && echo "$@" >> "$STUB_TRIVY_ARGS" && echo "$1 DOCKER_CONFIG=$DOCKER_CONFIG" >> "$STUB_TRIVY_ARGS.dc"
 cp "$STUB_TRIVY_FILE" "$out"
 S
-chmod +x "$T/stubs/trivy"; export STUB_TRIVY_FILE="$HERE/fixtures/trivy_sample.json"
+chmod +x "$T/stubs/trivy"; export STUB_TRIVY_FILE="$HERE/fixtures/trivy_sample.json" STUB_TRIVY_ARGS="$T/trivy.args"
 printf 'demoimg  docker.io/x/demo:1  demo\n' > "$R/config/images.conf"
 run_it_all() { "$R/bin/run.sh" "$@" > "$T/out.txt" 2>&1; RC=$?; sleep 1; }
 run_it_all --no-sync
 IMGREP="$R/results/report-images-latest.md"
 check "退出码 0，两份报告都生成" '[ $RC -eq 0 ] && [ -s "$SUM" ] && [ -s "$IMGREP" ]'
-check "先分支后镜像（日志顺序）" 'L="$(ls "$R"/logs/run-*.log)"; [ "$(grep -n "STEP 1/2" "$L" | tail -1 | cut -d: -f1)" -lt "$(grep -n "STEP 2/2" "$L" | tail -1 | cut -d: -f1)" ]'
+check "先分支后镜像（日志顺序）" 'L="$(ls "$R"/logs/run-*.log)"; [ "$(grep -n "STEP 1/3" "$L" | tail -1 | cut -d: -f1)" -lt "$(grep -n "STEP 3/3" "$L" | tail -1 | cut -d: -f1)" ]'
+check "没有 builds.conf：跳过源码构建" '! grep -q "STEP 2/3" "$(ls "$R"/logs/run-*.log)" && grep -q "source builds skipped" "$(ls "$R"/logs/run-*.log)"'
 check "镜像报告含源码状态（源码已修复/未修复两节）" 'grep -q "## 4. 源码已修复、还没发镜像的" "$IMGREP" && grep -q "## 5. 源码也还没修复的" "$IMGREP"'
 check "镜像和分支共用同一个运行ID" 'RID="$(basename "$(readlink "$B/latest")")"; [ -d "$R/results/images/demoimg/$RID" ]'
 check "终端汇总同时列出分支和镜像" 'grep -q "^demo " "$T/out.txt" && grep -q "^demoimg " "$T/out.txt" && grep -q "镜像报告:" "$T/out.txt"'
@@ -168,6 +193,30 @@ run_it_all --no-sync --only demoimg
 check "--only 镜像名：同时处理对应分支" '[ $RC -eq 0 ] && grep -q "^demo  *OK" "$T/out.txt" && grep -q "^demoimg  *OK" "$T/out.txt"'
 run_it_all --only nope
 check "--only 不存在的名称：退出码 2" '[ $RC -eq 2 ]'
+
+echo "== 11b. 源码构建（builds.conf）：编译 -> trivy rootfs -> 合进镜像报告"
+printf 'demobuild  demo  0  ./cmd/a=bin-a,./cmd/b  tag1\n' > "$R/config/builds.conf"
+rm -f "$T/go.args"
+run_it_all --no-sync
+BR="$R/results/builds/demobuild"
+check "退出码 0，源码构建有报告，按 linux/amd64、CGO=0 编译两个包" '[ $RC -eq 0 ] && [ -s "$BR/latest/report.md" ] && [ "$(grep -c "linux/amd64 CGO=0" "$T/go.args")" -eq 2 ] && grep -q -- "-tags=tag1" "$T/go.args"'
+check "包=二进制名 和 省略二进制名 都生效" 'grep -q "bin-a" "$BR/latest/meta.json" && grep -q "\"binaries\":\"bin-a,b\"" "$BR/latest/meta.json"'
+check "顺序：分支 -> 源码构建 -> 镜像" 'L="$(ls "$R"/logs/run-*.log)"; a=$(grep -n "STEP 1/3" "$L" | tail -1 | cut -d: -f1); b=$(grep -n "STEP 2/3" "$L" | tail -1 | cut -d: -f1); c=$(grep -n "STEP 3/3" "$L" | tail -1 | cut -d: -f1); [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ]'
+check "trivy 用 rootfs 扫编出的目录，扫完删除二进制" 'grep -q "^rootfs .*state/build/demobuild$" "$T/trivy.args" && [ ! -d "$R/state/build/demobuild" ]'
+check "源码构建的 trivy 也用匿名 Docker 配置（下载漏洞库时不读 credsStore）" 'grep -q "^rootfs DOCKER_CONFIG=.*state/docker-anon$" "$T/trivy.args.dc"'
+check "镜像报告里有源码构建和镜像两行" 'grep -q "源码构建（demo 分支 HEAD）" "$IMGREP" && grep -q "按分支 HEAD 构建" "$IMGREP" && grep -q "docker.io/x/demo:1" "$IMGREP"'
+check "终端汇总列出源码构建" 'grep -q "^demobuild  *OK" "$T/out.txt"'
+check "源码构建和镜像共用同一个运行ID" 'RID="$(basename "$(readlink "$BR/latest")")"; [ -d "$R/results/images/demoimg/$RID" ]'
+STUB_GO_FAIL=1 run_it_all --no-sync
+check "编译失败：退出码 1，FAILED-BUILD，告警带编译错误，镜像照常" '[ $RC -eq 1 ] && grep -q "^demobuild  *FAILED-BUILD" "$T/out.txt" && grep "\[ERROR\]" "$ALERTS" | grep -q "compile error" && grep -q "^demoimg  *OK" "$T/out.txt"'
+run_it_all --no-sync --only demobuild
+check "--only 源码构建名：同时处理对应分支，不扫镜像" '[ $RC -eq 0 ] && grep -q "^demo  *OK" "$T/out.txt" && grep -q "^demobuild  *OK" "$T/out.txt" && ! grep -q "^demoimg " "$T/out.txt"'
+run_it_all --no-sync --no-builds
+check "--no-builds：跳过源码构建" '[ $RC -eq 0 ] && ! grep -q "^demobuild " "$T/out.txt" && grep -q "^demoimg  *OK" "$T/out.txt"'
+printf 'demoimg  demo  0  ./cmd/a\n' > "$R/config/builds.conf"
+run_it_all --no-sync
+check "builds.conf 和 images.conf 重名：报错并跳过这个源码构建" '[ $RC -eq 1 ] && grep "\[ERROR\]" "$ALERTS" | grep -q "in both builds.conf and images.conf"'
+rm -f "$R/config/builds.conf"
 
 echo "== 12. REQUIRED_MOUNT：设了但没挂载时直接退出 2；留空不检查"
 cp "$R/config/settings.env" "$T/settings.keep"

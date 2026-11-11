@@ -131,6 +131,24 @@ class Report(unittest.TestCase):
         self.assertEqual(md.count("openssl-libs"), 1)
         self.assertGreater(md.index("openssl-libs"), md.index("## 附录：操作系统包"))
 
+    def test_build_meta(self):
+        """源码构建（kind=build）：不按镜像 tag 算落后多少 commit，报告头写构建信息，CGO 平台说明进 notes。"""
+        m = json.load(open(self.meta))
+        m.update({"kind": "build", "image": "源码构建 pd@abc1234", "commit": "abc1234def", "go_version": "go1.27.3",
+                  "cgo": "1", "platform": "darwin/arm64", "build_note": "依赖 CGO，按本机平台 darwin/arm64 编译"})
+        json.dump(m, open(self.meta, "w"))
+        rep, _, out = self.run_report(self.wt)
+        self.assertEqual(rep["meta"]["relation"], "按分支 HEAD 构建")
+        self.assertNotIn("image_commit", rep["meta"])
+        self.assertTrue(any("darwin/arm64" in n for n in rep["notes"]))
+        md = open(os.path.join(out, "report.md")).read()
+        self.assertIn("源码构建：从分支 HEAD 编出 Go 二进制", md)
+        self.assertIn("go1.27.3", md)
+        self.assertNotIn("digest", md)
+        # 状态比较和镜像一样
+        by = {(i["package"], i["id"]): i for i in rep["issues"]}
+        self.assertEqual(by[("golang.org/x/crypto", "CVE-2026-56855")]["status"], iv.ST_FIXED)
+
     def test_no_worktree(self):
         rep, _, _ = self.run_report("")
         self.assertTrue(any("worktree" in n for n in rep["notes"]))

@@ -35,7 +35,7 @@ for lock in "$STATE_DIR/run.lock"; do
   [ -d "$lock" ] || continue
   pid="$(cat "$lock/pid" 2>/dev/null)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    echo "ERROR: 有扫描正在运行（$(basename "$lock")，pid $pid），请等它结束后再清理。" >&2
+    echo "ERROR: 有扫描正在运行（$(basename "$lock")，pid ${pid}），请等它结束后再清理。" >&2
     exit 3
   fi
 done
@@ -74,7 +74,7 @@ is_unsafe() {
 }
 
 # ---- 列出计划 ----
-echo "SCA 清理（$SCA_ROOT）"
+echo "SCA 清理（${SCA_ROOT}）"
 TARGETS=""
 if [ "$DO_GIT" = 1 ]; then
   echo "本地 GitHub 分支："
@@ -88,7 +88,7 @@ if [ "$DO_GO" = 1 ]; then
   echo "Go 缓存（清空目录内容，保留目录本身）："
   echo "$GO_DIRS" | while IFS= read -r d; do
     [ -n "$d" ] || continue
-    if [ -d "$d" ]; then echo "  - $d"; else echo "  - $d（不存在，跳过）"; fi
+    if [ -d "$d" ]; then echo "  - $d"; else echo "  - ${d}（不存在，跳过）"; fi
   done
   TARGETS=1
 fi

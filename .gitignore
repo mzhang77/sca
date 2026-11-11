@@ -1,6 +1,7 @@
 # 本机配置（从 *.example 复制）
 config/branches.conf
 config/images.conf
+config/builds.conf
 config/settings.env
 
 # 运行时生成的目录

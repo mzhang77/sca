@@ -12,6 +12,8 @@ for c in branches.conf images.conf; do
   if [ -f "$CONF_DIR/$c" ]; then echo "配置: config/$c 已存在"
   else echo "配置: 缺少 config/$c  ->  cp config/$c.example config/$c  然后按需修改"; bad=1; fi
 done
+if [ -f "$CONF_DIR/builds.conf" ]; then echo "配置: config/builds.conf 已存在（源码构建，需要 go）"
+else echo "配置: 没有 config/builds.conf，跳过源码构建（可选：cp config/builds.conf.example config/builds.conf）"; fi
 if [ -f "$CONF_DIR/settings.env" ]; then echo "配置: config/settings.env 已存在"
 else echo "配置: 没有 config/settings.env，使用默认设置（可选：cp config/settings.env.example config/settings.env）"; fi
 echo
@@ -38,7 +40,8 @@ else
 fi
 
 if have_tool go; then row OK go "$(go version)"; else
-  row MISS go "可选（Go 可达性分析、清理 Go 缓存时用）。如果用 gvm 等工具装了 Go，但当前 shell 没加载："
+  if [ -f "$CONF_DIR/builds.conf" ]; then row MISS go "源码构建（config/builds.conf）需要；Go 可达性分析、清理 Go 缓存时也用。如果用 gvm 等工具装了 Go，但当前 shell 没加载："; bad=1
+  else row MISS go "可选（源码构建、Go 可达性分析、清理 Go 缓存时用）。如果用 gvm 等工具装了 Go，但当前 shell 没加载："; fi
   echo "                       把 Go 的 bin 目录写进 config/settings.env 的 EXTRA_PATH（脚本不会加载 gvm 之类的 shell 初始化）"
   echo "                       没有的话: brew install go   （这些仓库用 Go 1.27.x，go.mod 会自动切换工具链，需 Go >= 1.21）"
 fi
@@ -49,7 +52,7 @@ if have_tool "$GOVULNCHECK"; then row OK govulncheck "$("$GOVULNCHECK" -version 
   echo "                       （请用最新的 Go 来安装：这些仓库用较新的 Go 语法，旧版编译出的 govulncheck 可能解析失败）"
 fi
 if have_tool "${TRIVY:-trivy}"; then row OK trivy "$("${TRIVY:-trivy}" --version 2>/dev/null | head -1)"; else
-  row MISS trivy "镜像报告（bin/run.sh 第 2 步）需要。安装： brew install trivy"
+  row MISS trivy "镜像报告（bin/run.sh 第 2、3 步）需要。安装： brew install trivy"
 fi
 echo
 if [ "${1:-}" = "--selftest" ]; then

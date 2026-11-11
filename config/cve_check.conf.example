@@ -1,0 +1,10 @@
+# bin/cve_check.py 的配置。一般和客户的 CVE 清单放在同一个目录，命名为 cve_check.conf（脚本会自动读取）；
+# 也可以放在 config/cve_check.conf 作为默认，或用 --config 指定。没有配置文件 = 看全部组件、不排除任何 CVE。
+#
+# components：要看的组件，写 images.conf / builds.conf / branches.conf 里的名称，可以写多行。
+#   同一个名称同时是镜像（或源码构建）和分支时，两种结果都看。
+components  tidb br tikv pd ticdc
+components  tidb-operator tidb-dashboard
+#
+# exclude：已确认不适用、不再列出的 CVE，后面写原因（报告里单独列出）。
+# exclude  CVE-2022-3023  TiDB 自身模块的伪版本被当成旧版 TiDB，误报

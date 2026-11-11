@@ -1,18 +1,21 @@
 # SCA：跟踪分支的依赖漏洞扫描
 
-手动触发，一个入口 `bin/run.sh`，每次按顺序做两步：
+手动触发，一个入口 `bin/run.sh`，每次按顺序做三步：
 1. **分支**：更新被跟踪的分支 -> 用 OSV-Scanner 扫依赖漏洞（Go + Rust + npm）-> （可选，缺省关闭）Go 用 govulncheck 标可达性 -> 每个分支生成**完整报告** -> 清理旧记录 -> `results/report-branches-latest.md`。
-2. **镜像**：用 Trivy 扫交付镜像 -> 和第 1 步刚更新的分支源码比较（源码是否已修复）-> `results/report-images-latest.md`。
+2. **源码构建**（可选，有 `config/builds.conf` 时）：从第 1 步刚更新的分支编出 Go 二进制 -> 用 Trivy 扫。给公开镜像更新不及时、客户会从分支自己 build 的组件用（如 tidb-operator、独立部署的 TiDB Dashboard）。
+3. **镜像**：用 Trivy 扫交付镜像 -> 和第 1 步刚更新的分支源码比较（源码是否已修复）。第 2、3 步合成一份 `results/report-images-latest.md`。
 
 一步失败不影响另一步。没有"新增/旧"的对比：每次运行都给出各分支**当前**的全部漏洞。通知渠道只有日志文件；没有定时任务，不发任何外部消息，不安装任何软件。
 
 ## 安装与首次使用
 1. 安装工具：`git`、`python3`（>= 3.8，只用标准库）、`curl`、[`osv-scanner`](https://github.com/google/osv-scanner) v2.x（分支扫描）、[`trivy`](https://github.com/aquasecurity/trivy)（镜像扫描）。
-   可选：`go` + `govulncheck`（Go 可达性分析，缺省关闭；`bin/cleanup.sh` 清 Go 缓存时也会用 `go env`）。macOS 上可以 `brew install osv-scanner trivy`。
+   有 `config/builds.conf` 时还需要 `go`（>= 1.21，会按分支 go.mod 自动下载需要的 Go 版本）；依赖 CGO 的源码构建（TiDB Dashboard）还需要 C 编译器（macOS：`xcode-select --install`）。
+   可选：`govulncheck`（Go 可达性分析，缺省关闭；`bin/cleanup.sh` 清 Go 缓存时也会用 `go env`）。macOS 上可以 `brew install osv-scanner trivy go`。
 2. 复制配置并按需修改：
    ```
    cp config/branches.conf.example config/branches.conf    # 要跟踪的分支
    cp config/images.conf.example   config/images.conf      # 要扫的交付镜像
+   cp config/builds.conf.example   config/builds.conf      # 可选：要从分支自己编译再扫的组件
    cp config/settings.env.example  config/settings.env     # 可选：PATH、超时、保留数量等设置
    ```
    `settings.env` 可以不建，没有时全部用默认值（和 example 里的值相同，只有 `EXTRA_PATH` 默认为空）。常用的本机设置：工具装在非标准位置时加 `EXTRA_PATH`；
@@ -27,13 +30,14 @@ macOS 和 Linux 都可以运行（脚本保持 bash 3.2 兼容）；防睡眠用
 ```
 bin/check_env.sh              # 检查工具是否齐全（只检查，缺什么会告诉你怎么装）
 bin/check_env.sh --selftest   # 装好 osv-scanner 后，用一个小 go.mod 验证输出格式能被解析
-bin/run.sh                    # 先跑全部分支，再扫全部镜像，出两份报告
-bin/run.sh --only kvproto     # 只跑一个分支（以及以它为源码的镜像）；也可以写镜像名，如 --only br
+bin/run.sh                    # 先跑全部分支，再做源码构建、扫全部镜像，出两份报告
+bin/run.sh --only kvproto     # 只跑一个分支（以及以它为源码的源码构建和镜像）；也可以写镜像名或源码构建名，如 --only br、--only tidb-dashboard
 bin/run.sh --no-sync          # 不 fetch（快速试跑）
 bin/run.sh --govulncheck      # 本次打开 Go 可达性分析（缺省关闭，见下）
 bin/run.sh --skip-db-update   # 不更新 Trivy 漏洞库
 bin/run.sh --branches-only    # 只做第 1 步（排查用）
-bin/run.sh --images-only      # 只做第 2 步，和 worktree 现有内容比较（排查用）
+bin/run.sh --images-only      # 只做第 2、3 步，用 worktree 现有内容（排查用）
+bin/run.sh --no-builds        # 跳过第 2 步（源码构建）
 tail -f logs/alerts.log       # 只看错误和警告
 bin/cleanup.sh                # 删除本地所有分支（repos/ worktrees/）并清空本项目的 Go 缓存（caches/）；--dry-run 只看不删，-y 不询问
 ```
@@ -63,13 +67,14 @@ bin/cleanup.sh                # 删除本地所有分支（repos/ worktrees/）�
 ```
 config/branches.conf   被跟踪的分支（名称 仓库URL 分支）——增删分支只改这里；从 branches.conf.example 复制，不进 git
 config/images.conf     要扫的交付镜像（名称 镜像 对应分支名称）；从 images.conf.example 复制，不进 git
+config/builds.conf     源码构建（名称 对应分支名称 CGO 包列表 [tags]）；可选，从 builds.conf.example 复制，不进 git
 config/settings.env    PATH、超时、RETENTION、排除路径、REQUIRED_MOUNT、Go 缓存位置等设置；可选，从 settings.env.example 复制，不进 git
-bin/                   run.sh(入口) lib.sh sync.sh scan.sh sca.py image_view.py check_env.sh cleanup.sh
+bin/                   run.sh(入口) lib.sh sync.sh scan.sh sca.py image_view.py check_env.sh cleanup.sh cve_check.py(核对客户 CVE)
 repos/<owner>__<repo>.git        bare + blobless 仓库，只 fetch 被跟踪的分支
 worktrees/<owner>__<repo>/<分支>/  每个分支一个 worktree（本地分支 sca/<分支>）
 caches/go-build  caches/go-mod   本项目的 Go 编译缓存和模块缓存（go 第一次用到时自动创建）
-results/  logs/  state/          结果 / 日志 / last_run.json 与 KEV 缓存
-tests/                  test_sca.py（单元）  test_image_view.py（镜像，桩 trivy）  e2e.sh（本地假 origin + 桩扫描器，不联网）
+results/  logs/  state/          结果 / 日志 / last_run.json 与 KEV 缓存；state/build/ 是源码构建的临时目录（扫完即删）
+tests/                  test_sca.py（单元）  test_image_view.py（镜像，桩 trivy）  test_cve_check.py（客户 CVE 核对）  e2e.sh（本地假 origin + 桩扫描器，不联网）
 ```
 
 ## 旧记录清理（RETENTION，默认 10）
@@ -91,10 +96,10 @@ tests/                  test_sca.py（单元）  test_image_view.py（镜像，�
 - stdlib 的漏洞按 go.mod 的 `go` 指令版本匹配 OSV，可达性按实际工具链版本匹配 govulncheck，两者可能不同。
 - kvproto 这类被 TiDB/TiKV 引用的库，最终生效的依赖版本由消费方的 go.mod / Cargo.lock 决定，其结果更多反映"该分支自己声明的依赖偏旧"。
 
-## 镜像报告（客户视角，bin/run.sh 第 2 步）
+## 镜像报告（客户视角，bin/run.sh 第 3 步）
 客户的商业扫描器扫的是交付的镜像，不是源码。`bin/run.sh` 在更新完分支后用 Trivy 扫 `config/images.conf` 里的镜像（默认 linux/amd64），
 再把每个漏洞和对应分支的源码比较，找出“源码已修复、还没发镜像”的情况。
-某个分支在第 1 步更新失败时，它对应的镜像仍会扫描，但对比的是该分支上次的内容，日志里会有 `[WARN] ... failed in step 1`。
+某个分支在第 1 步更新失败时，它对应的源码构建和镜像仍会处理，但对比的是该分支上次的内容，日志里会有 `[WARN] ... failed in step 1`。
 - **results/report-images-latest.md**（镜像报告）：0) Go 官方近期修复命中镜像（golang.org/x/* 和标准库，近 `GO_OFFICIAL_DAYS` 天，按公布日期倒序）；1) 总览；2) 客户最可能提的（KEV，或 HIGH/CRITICAL 且有修复版本）；3) 近 N 天新公布的；
   4) 源码已修复、还没发镜像的；5) 源码也没修复的；6) 说明；最后是**附录：操作系统包**。
 - 这份报告假设客户从分支自己 build 私有镜像，所以 OS 包不计入统计，只列在报告最后的附录里（单个镜像的 report.md 也一样）。
@@ -105,6 +110,37 @@ tests/                  test_sca.py（单元）  test_image_view.py（镜像，�
 - 交付了新镜像后，改 `config/images.conf`。日志和分支共用 `logs/run-YYYY-MM-DD.log`，告警同样写入 `logs/alerts.log`；分支和镜像的结果目录用同一个运行ID。
 - 已知限制：TiKV 是 Rust，二进制里没有依赖清单时 Trivy（以及客户的扫描器）只能看到 OS 包；Dashboard 前端（npm）嵌在 pd-server 里，镜像扫描看不到。
 - 测试：`python3 tests/test_image_view.py`（桩 trivy，不联网）。
+
+## 源码构建（bin/run.sh 第 2 步，config/builds.conf）
+有些组件的公开镜像更新得慢，但客户是从分支自己 build 镜像来扫的（例如 tidb-operator，以及 tidb-operator 部署的独立 TiDB Dashboard）。
+只扫公开镜像会滞后，所以直接从分支编出镜像里的 Go 二进制再用 Trivy 扫。只编 Go 二进制、不 build 镜像：
+客户扫描器在 Go 二进制里看到的是模块清单（只取决于分支的 go.mod 和编译的包）和 Go 版本；OS 层来自客户自己的基础镜像，本来就不计入；前端 npm 依赖看分支报告。
+- 每行：`名称  对应 branches.conf 的名称  CGO(0/1)  包列表  [build tags]`，包列表逗号分隔，写成 `./cmd/x=二进制名`。名称不能和 images.conf 重复。
+- 编译方式和官方 Makefile 一致：`go build -trimpath`，CGO=0 时按 `IMAGE_PLATFORM`（linux/amd64）交叉编译。
+  CGO=1（TiDB Dashboard 依赖 go-graphviz）无法交叉编译，按本机平台编（Mac 上是 darwin/arm64），报告里会注明；依赖模块的版本相同。
+- Go 版本：缺省按分支 go.mod 的 `toolchain`（没有则 `go` 指令，如 1.27.3）设 `GOTOOLCHAIN`，第一次会自动下载这个版本；`BUILD_GOTOOLCHAIN` 可改成 `local` / `auto` / 指定版本。
+- 结果在 **results/builds/<名称>/<运行ID>/**：`build.log`、`trivy.json`、`report.{md,tsv,json}`，保留数量同样受 `RETENTION` 控制。编出的二进制放在 `state/build/<名称>/`，扫完即删（`BUILD_KEEP_BINARIES=1` 保留）。
+- 汇总在镜像报告里，“镜像”列写“源码构建（<分支> 分支 HEAD）”，“镜像与分支”列是“按分支 HEAD 构建”。因为就是从 HEAD 编的，“源码已修复待发镜像”一节不会有源码构建的条目。
+- 某个包编译失败或超时（`BUILD_TIMEOUT`，默认 2700 秒）：这个源码构建记 `FAILED-BUILD`、写 `[ERROR]`（带编译错误的最后几行），不影响其他目标；完整输出在 `build.log`。
+- 已知限制：只覆盖编出来的 Go 二进制。镜像里直接复制进来的其他东西不在内，比如 tidb-backup-manager 镜像里的 `tidb-lightning`、`dumpling`（来自 `pingcap/tidb-lightning`、`pingcap/dumpling` 镜像）和它的专用基础镜像；需要的话把这些镜像加进 images.conf。
+
+## 核对客户提交的 CVE（bin/cve_check.py）
+客户报来一批 CVE 时，拿它们对照 `results/` 里各组件**最新一次**的结果，列出哪些还没解决、在哪些组件里、要升级哪些依赖。不重新扫描，先跑一次 `bin/run.sh` 保证结果是新的。
+```
+bin/cve_check.py 客户目录/cves.txt                 # 自动读取同目录的 cve_check.conf
+bin/cve_check.py cves.txt --config x.conf --out y.md
+```
+- **CVE 清单**：纯文本，一行一个编号（CVE-/GHSA-/GO-，大小写都行）；`#` 开头的行和空行忽略，编号后面可以写注释。不是编号的行会跳过并在报告开头提示。
+- **配置**（见 `config/cve_check.conf.example`）：`components` 要看的组件（images.conf / builds.conf / branches.conf 的名称），`exclude` 不再列出的 CVE 和原因。
+- **输出**：`results/cve-check-<清单名>.md`（清单文件叫 cves.txt 时用目录名）和同名 `.tsv`（逐个 CVE：结论、组件、依赖包、升级到，方便贴回客户的表格）。
+- 每个 CVE 的结论：
+  - **未解决-交付物**：在镜像或源码构建的最新结果里（非 OS 包）。报告按组件列出依赖包、当前版本、升级到哪个版本、怎么处理（镜像的源码已修复 = 发新镜像；否则在分支上升级依赖），再按依赖包跨组件合并一次。只有分支结果、没有扫镜像或源码构建的组件（如 ng-monitoring），它的分支命中也列在这一节（类型写“分支”，版本是分支源码清单里的）。
+  - **未解决-仅分支**：只在分支的源码清单里（go.mod、lock 文件），我们扫的二进制里没有。单独一节。
+  - **已解决**：所选组件以前的扫描里出现过，最新结果里没有了。只列编号。
+  - **仅 OS 包**：只在镜像的 OS 包里出现过。客户自己 build 镜像，不考虑。
+  - **从未扫到**：所选组件的任何一次扫描（`RETENTION` 保留的范围内）里都没有。可能在没选、没扫的组件或镜像里（如 tidb-backup-manager 镜像里直接复制进来的 tidb-lightning、dumpling），或者扫描器的库没收录，需要问客户。
+  - **排除**：配置里 `exclude` 的。
+- 测试：`python3 tests/test_cve_check.py`。
 
 ## License
 MIT，见 [LICENSE](LICENSE)。

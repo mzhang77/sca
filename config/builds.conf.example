@@ -1,0 +1,19 @@
+# 自己从分支编译、再用 Trivy 扫的“源码构建”。用于没有及时更新的公开镜像、但客户会从分支自己 build 的组件。
+# 使用前复制一份：cp config/builds.conf.example config/builds.conf，再按需修改（builds.conf 不进 git）。没有这个文件就跳过这一步。
+#
+# 一行一个：  名称  对应 branches.conf 的名称  CGO(0/1)  要编译的包  [build tags]
+# - 名称：结果目录 results/builds/<名称>/ 和报告里显示的名字，不要和 images.conf 的名称重复
+# - 要编译的包：逗号分隔，相对仓库根，写成 包=二进制名（省略 =二进制名 时用包的最后一级目录名）
+# - CGO=0：按 IMAGE_PLATFORM（默认 linux/amd64）交叉编译，和官方 Makefile 一样
+#   CGO=1：依赖 C 代码，无法交叉编译，按本机平台编译（Mac 上就是 darwin/arm64）。依赖模块的版本和 linux 版一样，
+#          只有少数只在某个系统上用到的模块可能不同；报告里会注明实际平台
+# - build tags：可选，逗号分隔
+# - 只编 Go 二进制，不 build 镜像：OS 层是客户自己的基础镜像，前端 npm 依赖在分支报告里
+#
+# tidb-operator（release-1.x）：按 Makefile 和 images/*/Dockerfile，三个镜像里的 Go 二进制
+tidb-operator          tidb-operator   0  ./cmd/controller-manager=tidb-controller-manager,./cmd/scheduler=tidb-scheduler,./cmd/discovery=tidb-discovery,./cmd/admission-webhook=tidb-admission-webhook
+tidb-backup-manager    tidb-operator   0  ./cmd/backup-manager=tidb-backup-manager
+br-federation-manager  tidb-operator   0  ./cmd/br-federation-manager=br-federation-manager
+# 独立部署的 TiDB Dashboard（tidb-operator 的 TidbDashboard 用 pingcap/tidb-dashboard 镜像）。
+# 依赖 go-graphviz（CGO）。不带 ui_server tag：前端资源不影响 Go 依赖
+tidb-dashboard         tidb-dashboard  1  ./cmd/tidb-dashboard=tidb-dashboard

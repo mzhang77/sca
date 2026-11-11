@@ -9,7 +9,8 @@ OS 包（需重建镜像）不参与任何预测和统计，单独放在报告�
 
 子命令:
   validate  检查 Trivy 输出是否为合法 JSON
-  report    trivy.json + 分支 worktree -> 单个镜像的 report.{json,tsv,md}
+  report    trivy.json + 分支 worktree -> 单个镜像（或源码构建）的 report.{json,tsv,md}
+            meta.json 里 kind=build 表示“源码构建”：从分支 HEAD 编出的 Go 二进制（run.sh 第 2 步），不是镜像
   summary   合并所有镜像最近一次成功的结果 -> results/report-images-latest.md
 """
 import argparse
@@ -311,7 +312,11 @@ def cmd_report(a):
         "digest": (md.get("RepoDigests") or [""])[0],
         "image_created": ((md.get("ImageConfig") or {}).get("created") or "")[:19],
     })
-    meta.update(image_vs_branch(meta.get("image", ""), wt))
+    is_build = meta.get("kind") == "build"
+    if is_build:
+        meta["relation"] = "按分支 HEAD 构建"
+    else:
+        meta.update(image_vs_branch(meta.get("image", ""), wt))
     if wt:
         rc, head = git(wt, "log", "-1", "--format=%h %cs")
         meta["branch_head"] = head if rc == 0 else ""
@@ -404,6 +409,8 @@ def cmd_report(a):
             notes.append("镜像中没有检出 Rust 依赖信息（二进制未用 cargo-auditable 嵌入依赖清单），客户的扫描器大概率也看不到 TiKV 的 crate 漏洞。")
     if not binaries and not saw_rust:
         notes.append("镜像中没有检出带依赖信息的 Go 二进制。")
+    if is_build and meta.get("build_note"):
+        notes.append(meta["build_note"])
     if not wt:
         notes.append("没有找到对应分支的 worktree，无法和源码比较（先跑一次 bin/run.sh）。")
 
@@ -533,8 +540,12 @@ def render_image_md(rep, recent_days):
     m, s = rep["meta"], rep["summary"]
     L = ["# 客户视角：%s\n" % m.get("image", "")]
     L.append("- 扫描时间: %s ｜ 运行ID: %s" % (m.get("scanned_at", ""), m.get("run_id", "")))
-    L.append("- 镜像: `%s`（%s）  digest: `%s`" % (m.get("image", ""), m.get("platform", ""), m.get("digest", "") or "?"))
-    L.append("- 基础系统: %s ｜ 镜像创建: %s" % (m.get("os") or "?", m.get("image_created") or "?"))
+    if m.get("kind") == "build":
+        L.append("- 源码构建：从分支 HEAD 编出 Go 二进制再用 Trivy 扫（不含 OS 层）。commit `%s` ｜ %s ｜ %s ｜ CGO_ENABLED=%s" % (
+            (m.get("commit") or "?")[:10], m.get("go_version") or "?", m.get("platform", ""), m.get("cgo", "?")))
+    else:
+        L.append("- 镜像: `%s`（%s）  digest: `%s`" % (m.get("image", ""), m.get("platform", ""), m.get("digest", "") or "?"))
+        L.append("- 基础系统: %s ｜ 镜像创建: %s" % (m.get("os") or "?", m.get("image_created") or "?"))
     L.append("- 对比分支: %s `%s`（HEAD %s）｜ %s" % (m.get("source", ""), m.get("branch", ""), m.get("branch_head", "") or "?", m.get("relation", "")))
     L.append("- 漏洞 %d ｜ HIGH/CRITICAL %d ｜ 客户可能提 %d ｜ 源码已修复待发镜像 %d ｜ 源码未修复 %d ｜ 近%d天新公布 %d（均不含 OS 包，OS 包见附录）\n" % (
         s["issues"], s["high_critical"], s["likely"], s["fixed_in_src"], s["not_fixed"], recent_days, s["recent"]))
@@ -626,20 +637,39 @@ def render_go_official(reps, days):
     return "\n".join(out) + "\n"
 
 
+def read_builds_conf(path):
+    """builds.conf：名称 分支名称 CGO 包列表 [tags] -> [(名称, 显示用的“镜像”列, 分支名称)]"""
+    out = []
+    if not path or not os.path.isfile(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        p = line.split()
+        if len(p) >= 4:
+            out.append((p[0], "源码构建（%s 分支 HEAD）" % p[1], p[1]))
+    return out
+
+
 def cmd_summary(a):
-    imgs = read_images_conf(a.conf)
+    entries = [(n, img, src, a.results, False) for n, img, src in (read_images_conf(a.conf) if a.conf else [])]
+    entries += [(n, img, src, a.builds_results, True) for n, img, src in read_builds_conf(a.builds_conf)]
     st = load_status(a.targets)
     reps = []
-    L = ["# 客户视角汇总（扫交付镜像）\n",
+    L = ["# 客户视角汇总（扫交付镜像 + 源码构建）\n",
          "生成时间: %s ｜ 运行ID: %s\n" % (dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), a.run_id),
          "用 Trivy 扫描交付给客户的镜像（%s），模拟客户的商业扫描器能看到的内容，再和对应分支的源码比较。"
+         "“源码构建”是公开镜像更新不及时的组件（客户从分支自己 build）：从分支 HEAD 编出 Go 二进制再扫，不含 OS 层。"
          "“客户可能提”= 在 CISA KEV 里，或 HIGH/CRITICAL 且有修复版本。\n" % a.platform]
     over, os_over = [], []
-    for name, image, src in imgs:
-        latest = os.path.join(a.results, name, "latest", "report.json")
+    for name, image, src, results, is_build in entries:
+        latest = os.path.join(results, name, "latest", "report.json")
         status = st.get(name, ("未运行", ""))
         rep = load_json(latest) if os.path.isfile(latest) else None
-        if rep and rep["meta"].get("image") != image:
+        if rep and not is_build and rep["meta"].get("image") != image:
             note = "（结果是旧镜像 %s 的）" % rep["meta"].get("image")
         else:
             note = ""
@@ -658,7 +688,7 @@ def cmd_summary(a):
         m, s = rep["meta"], make_summary(rep["issues"])
         os_over.append([name, s["os"], s["os_high"]])
         reps.append((name, rep))
-        over.append([name, "`%s`%s" % (image, note), "%s (%s)" % (src, m.get("branch_head", "") or "?"), m.get("relation", ""),
+        over.append([name, ("%s" if is_build else "`%s`") % image + note, "%s (%s)" % (src, m.get("branch_head", "") or "?"), m.get("relation", ""),
                      m.get("scanned_at", "")[:16].replace("T", " "), stxt, s["issues"], s["high_critical"], s["likely"],
                      s["fixed_in_src"], s["not_fixed"]])
     L.append(render_go_official(reps, a.go_days))
@@ -713,7 +743,8 @@ def main():
     p.add_argument("--meta", default=""); p.add_argument("--kev", default="")
     p.add_argument("--recent-days", type=int, default=45); p.add_argument("--out", required=True)
     p = sp.add_parser("summary")
-    p.add_argument("--conf", required=True); p.add_argument("--results", required=True)
+    p.add_argument("--conf", default=""); p.add_argument("--results", required=True)
+    p.add_argument("--builds-conf", default=""); p.add_argument("--builds-results", default="")
     p.add_argument("--targets", default=""); p.add_argument("--run-id", default="")
     p.add_argument("--platform", default="linux/amd64")
     p.add_argument("--go-days", type=int, default=90)

@@ -42,6 +42,10 @@ touch "$LOG_DIR/alerts.log"   # 先建好，方便 tail -f
 : "${RETENTION:=10}"
 : "${PREVENT_SLEEP:=1}"
 : "${PYTHON:=python3}"
+: "${BUILD_TIMEOUT:=2700}"          # 源码构建：每个包 go build 的超时（秒，首次要下载模块和 Go 工具链）
+: "${BUILD_GOTOOLCHAIN=}"            # 源码构建用的 Go：空 = 按分支 go.mod 的 toolchain（没有则 go 指令），local / auto / go1.x.y = 指定
+: "${BUILD_KEEP_BINARIES:=0}"        # 1 = 扫完保留编出的二进制（state/build/<名称>/），排查用
+BUILD_DIR="$STATE_DIR/build"
 : "${GO_BUILD_CACHE=$SCA_ROOT/caches/go-build}"   # 不带冒号：设成空字符串 = 不覆盖，用 Go 自己的设置
 : "${GO_MOD_CACHE=$SCA_ROOT/caches/go-mod}"
 # Go 缓存只对本项目生效：通过环境变量传给 go / govulncheck，不改 `go env -w` 的全局设置

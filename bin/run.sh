@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# run.sh - 手动触发的唯一入口。每次运行按顺序做两件事：
+# run.sh - 手动触发的唯一入口。每次运行按顺序做三件事：
 #   1) 分支：更新被跟踪的分支 -> OSV-Scanner 扫依赖 -> 每个分支的完整报告 -> 汇总 results/report-branches-latest.md
-#   2) 镜像：Trivy 扫交付镜像 -> 和第 1 步更新后的分支源码比较（源码是否已修复）-> 汇总 results/report-images-latest.md
+#   2) 源码构建：按 config/builds.conf 从第 1 步更新后的分支编出 Go 二进制 -> Trivy 扫（没有 builds.conf 就跳过）
+#   3) 镜像：Trivy 扫交付镜像 -> 和第 1 步更新后的分支源码比较（源码是否已修复）
+#   第 2、3 步的结果合在一起 -> results/report-images-latest.md
 # 失败写 [ALERT]；一个阶段失败不影响另一个阶段。
 #
 # 用法：bin/run.sh [--only 名称] [--no-sync] [--govulncheck | --no-govulncheck] [--skip-db-update]
-#                  [--branches-only | --images-only]
-#   --only NAME        只处理一个目标：NAME 可以是 branches.conf 的名称（同时扫它对应的镜像），
-#                      也可以是 images.conf 的名称（同时更新它对应的分支）
+#                  [--branches-only | --images-only] [--no-builds]
+#   --only NAME        只处理一个目标：NAME 可以是 branches.conf 的名称（同时扫它对应的源码构建和镜像），
+#                      也可以是 builds.conf / images.conf 的名称（同时更新它对应的分支）
 #   --no-sync          不 fetch，直接扫描 worktree 当前内容
 #   --govulncheck      本次运行做 Go 可达性分析（缺省由 settings.env 的 GOVULNCHECK_ENABLED 决定，默认关）
 #   --no-govulncheck   本次运行跳过可达性分析
 #   --skip-db-update   不更新 Trivy 漏洞库（离线 / 刚更新过时用）
 #   --branches-only    只做第 1 步（排查用）
-#   --images-only      只做第 2 步，和 worktree 现有内容比较（排查用）
+#   --images-only      只做第 2、3 步，用 worktree 现有内容（排查用）
+#   --no-builds        跳过第 2 步（源码构建）
 # 退出码：0 = 全部成功；1 = 有失败（见 [ALERT] [ERROR]）；2 = 前置条件不满足；3 = 已有实例在运行
 
 BIN="$(cd "$(dirname "$0")" && pwd)"
@@ -29,10 +32,11 @@ BIN="$(cd "$(dirname "$0")" && pwd)"
 : "${USE_DOCKER_CREDS:=0}"
 IMG_PY="$BIN/image_view.py"
 IMG_RESULTS="$RESULTS_DIR/images"
+BUILD_RESULTS="$RESULTS_DIR/builds"
 BRANCH_REPORT="$RESULTS_DIR/report-branches-latest.md"
 IMAGE_REPORT="$RESULTS_DIR/report-images-latest.md"
 
-ONLY=""; NO_SYNC=0; NO_GOVULN=0; FORCE_GOVULN=0; SKIP_DB=0; DO_BRANCHES=1; DO_IMAGES=1
+ONLY=""; NO_SYNC=0; NO_GOVULN=0; FORCE_GOVULN=0; SKIP_DB=0; DO_BRANCHES=1; DO_IMAGES=1; DO_BUILDS=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift 2;;
@@ -40,21 +44,25 @@ while [ $# -gt 0 ]; do
     --no-govulncheck) NO_GOVULN=1; shift;;
     --govulncheck) FORCE_GOVULN=1; shift;;
     --skip-db-update) SKIP_DB=1; shift;;
-    --branches-only) DO_IMAGES=0; shift;;
+    --branches-only) DO_IMAGES=0; DO_BUILDS=0; shift;;
+    --no-builds) DO_BUILDS=0; shift;;
     --images-only) DO_BRANCHES=0; shift;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
 if [ "$DO_BRANCHES" = 0 ] && [ "$DO_IMAGES" = 0 ]; then echo "--branches-only 和 --images-only 不能同时使用" >&2; exit 2; fi
 [ "$FORCE_GOVULN" = "1" ] && [ "$NO_GOVULN" != "1" ] && GOVULNCHECK_ENABLED=1
+# 源码构建可选：没有 config/builds.conf 就跳过
+HAVE_BUILDS=0; [ -f "$CONF_DIR/builds.conf" ] && HAVE_BUILDS=1
+[ "$HAVE_BUILDS" = 0 ] && DO_BUILDS=0
 
 RUN_ID="$(date +%Y-%m-%d_%H%M%S)"
 RUN_LOG="$LOG_DIR/run-$(date +%F).log"
 STARTED="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 FINISHED=0; LOCK_OWNED=0; CAFF_PID=""
 TARGETS_TSV="$STATE_DIR/targets.$$.tsv"; : > "$TARGETS_TSV"   # 分支结果：name branch status commit issues message
-IMAGES_TSV="$STATE_DIR/images.$$.tsv";   : > "$IMAGES_TSV"    # 镜像结果：name status issues
+IMAGES_TSV="$STATE_DIR/images.$$.tsv";   : > "$IMAGES_TSV"    # 镜像和源码构建结果：name status issues
 KEV_FILE=""
 FAILED_BRANCHES=" "     # 本次更新/扫描失败的分支名称（镜像对比时提示用的是旧内容）
 
@@ -91,6 +99,7 @@ rec_img() {  # name status issues
 }
 
 read_images() { grep -v '^[[:space:]]*#' "$CONF_DIR/images.conf" | grep -v '^[[:space:]]*$'; }
+read_builds() { grep -v '^[[:space:]]*#' "$CONF_DIR/builds.conf" | grep -v '^[[:space:]]*$'; }
 
 # ---------- 单实例锁 ----------
 if mkdir "$STATE_DIR/run.lock" 2>/dev/null; then
@@ -104,7 +113,7 @@ else
   rm -rf "$STATE_DIR/run.lock"; mkdir "$STATE_DIR/run.lock" && echo $$ > "$STATE_DIR/run.lock/pid" && LOCK_OWNED=1
 fi
 
-log_info "===== RUN START id=$RUN_ID root=$SCA_ROOT branches=$DO_BRANCHES images=$DO_IMAGES ====="
+log_info "===== RUN START id=$RUN_ID root=$SCA_ROOT branches=$DO_BRANCHES builds=$DO_BUILDS images=$DO_IMAGES ====="
 
 # ---------- 防止 Mac 睡眠 ----------
 # caffeinate -w $$：绑定本脚本进程，脚本结束（含出错/被中断）时自动退出。
@@ -129,12 +138,18 @@ if [ "$DO_BRANCHES" = 1 ] && ! have_tool "$OSV_SCANNER"; then
 fi
 if [ "$DO_IMAGES" = 1 ]; then
   [ -f "$CONF_DIR/images.conf" ] || fatal 2 "missing $CONF_DIR/images.conf (cp config/images.conf.example config/images.conf, then edit)"
+fi
+if [ "$DO_IMAGES" = 1 ] || [ "$DO_BUILDS" = 1 ]; then
   have_tool "$TRIVY" || fatal 2 "trivy not found in PATH (install: brew install trivy)"
   log_info "trivy: $("$TRIVY" --version 2>/dev/null | head -1)"
 fi
+if [ "$DO_BUILDS" = 1 ] && ! have_tool go; then
+  alert ERROR "go not found in PATH: source builds (config/builds.conf) skipped. Install Go or add it to EXTRA_PATH"
+  DO_BUILDS=0
+fi
 
 # ---------- --only：同时选中分支和它对应的镜像 ----------
-SEL_BRANCHES=""; SEL_IMAGES=""
+SEL_BRANCHES=""; SEL_IMAGES=""; SEL_BUILDS=""
 if [ -n "$ONLY" ]; then
   while IFS= read -r line; do
     read -r n _ <<< "$line"; [ "$n" = "$ONLY" ] && SEL_BRANCHES=" $n "
@@ -148,10 +163,20 @@ if [ -n "$ONLY" ]; then
       fi
     done < <(read_images)
   fi
-  [ -n "$SEL_BRANCHES$SEL_IMAGES" ] || fatal 2 "--only $ONLY: no such name in branches.conf or images.conf"
+  if [ "$HAVE_BUILDS" = 1 ]; then
+    while IFS= read -r line; do
+      read -r n src _ <<< "$line"
+      if [ "$n" = "$ONLY" ] || [ "$src" = "$ONLY" ]; then
+        SEL_BUILDS="$SEL_BUILDS $n "
+        case "$SEL_BRANCHES" in *" $src "*) ;; *) SEL_BRANCHES="$SEL_BRANCHES $src ";; esac
+      fi
+    done < <(read_builds)
+  fi
+  [ -n "$SEL_BRANCHES$SEL_IMAGES$SEL_BUILDS" ] || fatal 2 "--only $ONLY: no such name in branches.conf, builds.conf or images.conf"
 fi
 branch_selected() { [ -z "$ONLY" ] || case "$SEL_BRANCHES" in *" $1 "*) return 0;; *) return 1;; esac; }
 image_selected()  { [ -z "$ONLY" ] || case "$SEL_IMAGES" in *" $1 "*) return 0;; *) return 1;; esac; }
+build_selected()  { [ -z "$ONLY" ] || case "$SEL_BUILDS" in *" $1 "*) return 0;; *) return 1;; esac; }
 
 retention_ok() {  # 打印告警并返回 1 表示 RETENTION 非法
   case "$RETENTION" in
@@ -209,7 +234,7 @@ process_target() {  # name url branch
 }
 
 if [ "$DO_BRANCHES" = 1 ]; then
-  log_info "===== STEP 1/2: branches ====="
+  log_info "===== STEP 1/3: branches ====="
   while IFS= read -r line <&3; do
     read -r name url branch rest <<< "$line"
     if [ -z "$name" ] || [ -z "$url" ] || [ -z "$branch" ]; then
@@ -234,7 +259,7 @@ if [ "$DO_BRANCHES" = 1 ]; then
 fi
 
 # =====================================================================
-# 第 2 步：镜像（和第 1 步更新后的分支源码比较）
+# 第 2、3 步共用
 # =====================================================================
 worktree_for() {  # branches.conf 名称 -> 打印 "worktree<TAB>branch"
   local line n u b
@@ -247,6 +272,105 @@ worktree_for() {  # branches.conf 名称 -> 打印 "worktree<TAB>branch"
   return 1
 }
 
+# 生成第 2、3 步的单个报告（trivy.json 已在 $out）。成功时打印汇总行，失败返回 1（已告警、已记录）。
+report_trivy() {  # name out wt base
+  local name="$1" out="$2" wt="$3" base="$4" summ
+  if ! "$PYTHON" "$IMG_PY" validate "$out/trivy.json" 2>>"$out/trivy.stderr"; then
+    alert ERROR "[$name] trivy output is not a valid report (see $out/trivy.json)"; rec_img "$name" FAILED-SCAN "bad output"; return 1
+  fi
+  if ! summ="$("$PYTHON" "$IMG_PY" report --trivy "$out/trivy.json" --worktree "$wt" --meta "$out/meta.json" \
+        --kev "$KEV_FILE" --recent-days "$RECENT_DAYS" --out "$out" 2>>"$RUN_LOG")"; then
+    alert ERROR "[$name] failed to build report from trivy output"; rec_img "$name" FAILED-REPORT ""; return 1
+  fi
+  log_info "[$name] $(echo "$summ" | awk -F'\t' '{printf "%s issues, %s high/critical, %s likely to be raised, %s fixed in source (awaiting image), %s not fixed in source", $1,$2,$3,$4,$5}')"
+  log_info "[$name] report: $out/report.md"
+  ln -sfn "$RUN_ID" "$base/latest"
+  rec_img "$name" OK "$(echo "$summ" | cut -f1)"
+}
+
+# =====================================================================
+# 第 2 步：源码构建（从第 1 步更新后的分支编出 Go 二进制，再用 Trivy 扫）
+# =====================================================================
+gomod_go_version() {  # go.mod -> toolchain 版本（没有则 go 指令），如 1.27.3
+  local v
+  v="$(sed -n 's/^toolchain[[:space:]][[:space:]]*go\([0-9][0-9.]*\).*/\1/p' "$1" 2>/dev/null | head -1)"
+  [ -n "$v" ] || v="$(sed -n 's/^go[[:space:]][[:space:]]*\([0-9][0-9.]*\).*/\1/p' "$1" 2>/dev/null | head -1)"
+  echo "$v"
+}
+
+process_build() {  # name src cgo pkgs [tags]
+  local name="$1" src="$2" cgo="$3" pkgs="$4" tags="${5:-}"
+  local base out summ wt branch head bdir goos goarch tc gv spec pkg bin rc note="" built="" tagarg=""
+  base="$BUILD_RESULTS/$name"; out="$base/$RUN_ID"; bdir="$BUILD_DIR/$name"
+  mkdir -p "$out"
+  log_info "----- [$name] source build from $src -----"
+  if ! summ="$(worktree_for "$src")"; then
+    alert ERROR "[$name] '$src' is not in branches.conf: cannot build"; rec_img "$name" FAILED-BUILD "no branch"; return
+  fi
+  wt="$(echo "$summ" | cut -f1)"; branch="$(echo "$summ" | cut -f2)"
+  if [ ! -e "$wt/.git" ]; then
+    alert ERROR "[$name] worktree $wt does not exist: cannot build"; rec_img "$name" FAILED-BUILD "no worktree"; return
+  fi
+  case "$FAILED_BRANCHES" in
+    *" $src "*) alert WARN "[$name] branch '$src' failed in step 1; building its previous worktree content";;
+  esac
+  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
+
+  case "$cgo" in
+    0) goos="${IMAGE_PLATFORM%%/*}"; goarch="${IMAGE_PLATFORM#*/}";;
+    1) goos="$(go env GOHOSTOS 2>/dev/null)"; goarch="$(go env GOHOSTARCH 2>/dev/null)"
+       [ -n "$goos" ] || goos="${IMAGE_PLATFORM%%/*}"; [ -n "$goarch" ] || goarch="${IMAGE_PLATFORM#*/}"
+       [ "$goos/$goarch" = "$IMAGE_PLATFORM" ] || note="依赖 CGO，按本机平台 $goos/$goarch 编译（不是 ${IMAGE_PLATFORM}）。依赖模块的版本相同，只有少数只在某个系统上用到的模块可能不同。";;
+    *) alert ERROR "config: CGO must be 0 or 1 in builds.conf ($name: '$cgo')"; rec_img "$name" FAILED-BUILD "bad config"; return;;
+  esac
+  tc="$BUILD_GOTOOLCHAIN"
+  if [ -z "$tc" ]; then
+    gv="$(gomod_go_version "$wt/go.mod")"
+    case "$gv" in *.*.*) tc="go$gv";; *) tc="auto";; esac
+  fi
+  [ -n "$tags" ] && tagarg="-tags=$tags"
+
+  rm -rf "$bdir"; mkdir -p "$bdir"
+  : > "$out/build.log"
+  for spec in $(echo "$pkgs" | tr ',' ' '); do
+    pkg="${spec%%=*}"; bin="${spec#*=}"
+    [ "$bin" = "$spec" ] && bin="$(basename "$pkg")"
+    log_info "[$name] go build $pkg -> $bin ($goos/$goarch, CGO_ENABLED=$cgo, GOTOOLCHAIN=$tc, timeout ${BUILD_TIMEOUT}s)"
+    echo "### go build $pkg -> $bin" >> "$out/build.log"
+    # shellcheck disable=SC2086
+    ( cd "$wt" && export GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo" GOTOOLCHAIN="$tc" \
+      && run_to "$BUILD_TIMEOUT" go build -trimpath $tagarg -o "$bdir/$bin" "$pkg" ) >>"$out/build.log" 2>&1
+    rc=$?
+    if [ $rc -eq 124 ]; then
+      alert ERROR "[$name] go build $pkg timed out after ${BUILD_TIMEOUT}s (see $out/build.log)"; rec_img "$name" FAILED-BUILD "timeout"; return
+    elif [ $rc -ne 0 ] || [ ! -f "$bdir/$bin" ]; then
+      alert ERROR "[$name] go build $pkg failed (exit $rc): $(grep -v '^go: downloading' "$out/build.log" | tail -n 3 | tr '\n\t' '  ')"
+      rec_img "$name" FAILED-BUILD "go build exit $rc"; return
+    fi
+    built="$built${built:+,}$bin"
+  done
+  gv="$(go version "$bdir/$(echo "$built" | cut -d, -f1)" 2>/dev/null | awk '{print $NF}')"
+  printf '{"name":"%s","kind":"build","image":"源码构建 %s@%s","platform":"%s/%s","source":"%s","branch":"%s","commit":"%s","go_version":"%s","cgo":"%s","binaries":"%s","build_note":"%s","run_id":"%s","scanned_at":"%s"}\n' \
+    "$name" "$src" "${head:0:7}" "$goos" "$goarch" "$src" "$branch" "$head" "${gv:-$tc}" "$cgo" "$built" "$note" "$RUN_ID" \
+    "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$out/meta.json"
+
+  log_info "[$name] trivy scanning built binaries (timeout ${TRIVY_TIMEOUT}s)"
+  # shellcheck disable=SC2086
+  run_to "$TRIVY_TIMEOUT" "$TRIVY" rootfs --quiet --format json --output "$out/trivy.json" \
+      --scanners vuln --list-all-pkgs --timeout "${TRIVY_TIMEOUT}s" $DB_FLAG "$bdir" 2>"$out/trivy.stderr"
+  rc=$?
+  [ "$BUILD_KEEP_BINARIES" = "1" ] || rm -rf "$bdir"
+  if [ $rc -eq 124 ]; then alert ERROR "[$name] trivy timed out after ${TRIVY_TIMEOUT}s"; rec_img "$name" FAILED-SCAN "timeout"; return; fi
+  if [ $rc -ne 0 ]; then
+    alert ERROR "[$name] trivy failed (exit $rc): $(tail -n 3 "$out/trivy.stderr" | tr '\n\t' '  ')"; rec_img "$name" FAILED-SCAN "trivy exit $rc"; return
+  fi
+  DB_FLAG="--skip-db-update"
+  report_trivy "$name" "$out" "$wt" "$base"
+}
+
+# =====================================================================
+# 第 3 步：镜像（和第 1 步更新后的分支源码比较）
+# =====================================================================
 process_image() {  # name image source
   local name="$1" image="$2" src="$3" out base wt branch rc summ
   base="$IMG_RESULTS/$name"; out="$base/$RUN_ID"
@@ -278,34 +402,48 @@ process_image() {  # name image source
     alert ERROR "[$name] trivy failed (exit $rc): $(tail -n 3 "$out/trivy.stderr" | tr '\n\t' '  ')"; rec_img "$name" FAILED-SCAN "trivy exit $rc"; return
   fi
   DB_FLAG="--skip-db-update"
-  if ! "$PYTHON" "$IMG_PY" validate "$out/trivy.json" 2>>"$out/trivy.stderr"; then
-    alert ERROR "[$name] trivy output is not a valid report (see $out/trivy.json)"; rec_img "$name" FAILED-SCAN "bad output"; return
-  fi
-  if ! summ="$("$PYTHON" "$IMG_PY" report --trivy "$out/trivy.json" --worktree "$wt" --meta "$out/meta.json" \
-        --kev "$KEV_FILE" --recent-days "$RECENT_DAYS" --out "$out" 2>>"$RUN_LOG")"; then
-    alert ERROR "[$name] failed to build report from trivy output"; rec_img "$name" FAILED-REPORT ""; return
-  fi
-  log_info "[$name] $(echo "$summ" | awk -F'\t' '{printf "%s issues, %s high/critical, %s likely to be raised, %s fixed in source (awaiting image), %s not fixed in source", $1,$2,$3,$4,$5}')"
-  log_info "[$name] report: $out/report.md"
-  ln -sfn "$RUN_ID" "$base/latest"
-  rec_img "$name" OK "$(echo "$summ" | cut -f1)"
+  report_trivy "$name" "$out" "$wt" "$base"
 }
 
-if [ "$DO_IMAGES" = 1 ]; then
-  log_info "===== STEP 2/2: images (platform=$IMAGE_PLATFORM) ====="
-  mkdir -p "$IMG_RESULTS"
-  # 拉镜像的凭据：默认匿名拉取（镜像都是 docker.io 上公开的）。
-  # 让 trivy 用一个空的 Docker 配置目录，避免读到 ~/.docker/config.json 里的 "credsStore": "desktop"
-  # （Docker Desktop 没装/没在 PATH 里时会报 docker-credential-desktop not found）。
-  # 需要用自己的 Docker 登录（比如遇到 Docker Hub 限流）时，在 settings.env 里设 USE_DOCKER_CREDS=1。
-  if [ "$USE_DOCKER_CREDS" != "1" ]; then
-    mkdir -p "$STATE_DIR/docker-anon"
-    [ -f "$STATE_DIR/docker-anon/config.json" ] || echo '{}' > "$STATE_DIR/docker-anon/config.json"
-    export DOCKER_CONFIG="$STATE_DIR/docker-anon"
-    log_info "pulling images anonymously (USE_DOCKER_CREDS=0)"
+# 漏洞库：第 2、3 步里第一次扫描时更新一次，之后都跳过更新
+DB_FLAG=""; [ "$SKIP_DB" -eq 1 ] && DB_FLAG="--skip-db-update"
+
+# Docker 凭据：默认匿名（镜像都是 docker.io 上公开的，Trivy 漏洞库在 ghcr.io 上也是公开的）。
+# 让 trivy 用一个空的 Docker 配置目录，避免读到 ~/.docker/config.json 里的 "credsStore": "desktop"
+# （Docker Desktop 没装/没在 PATH 里时会报 docker-credential-desktop not found）。
+# 第 2 步（trivy rootfs）第一次扫描时也要下载漏洞库，同样会读 Docker 凭据，所以在第 2、3 步之前设置。
+# 需要用自己的 Docker 登录（比如遇到 Docker Hub 限流）时，在 settings.env 里设 USE_DOCKER_CREDS=1。
+if { [ "$DO_IMAGES" = 1 ] || [ "$DO_BUILDS" = 1 ]; } && [ "$USE_DOCKER_CREDS" != "1" ]; then
+  mkdir -p "$STATE_DIR/docker-anon"
+  [ -f "$STATE_DIR/docker-anon/config.json" ] || echo '{}' > "$STATE_DIR/docker-anon/config.json"
+  export DOCKER_CONFIG="$STATE_DIR/docker-anon"
+  log_info "trivy uses anonymous registry access (USE_DOCKER_CREDS=0)"
+fi
+
+if [ "$DO_BUILDS" = 1 ]; then
+  log_info "===== STEP 2/3: source builds (config/builds.conf) ====="
+  mkdir -p "$BUILD_RESULTS" "$BUILD_DIR"
+  while IFS= read -r line <&3; do
+    read -r name src cgo pkgs tags rest <<< "$line"
+    if [ -z "$name" ] || [ -z "$src" ] || [ -z "$cgo" ] || [ -z "$pkgs" ]; then alert ERROR "config: malformed line in builds.conf: $line"; continue; fi
+    build_selected "$name" || continue
+    if [ -f "$CONF_DIR/images.conf" ] && read_images | awk '{print $1}' | grep -qx "$name"; then
+      alert ERROR "config: '$name' is in both builds.conf and images.conf; rename one"; continue
+    fi
+    process_build "$name" "$src" "$cgo" "$pkgs" "$tags"
+  done 3< <(read_builds)
+  if retention_ok "source build"; then
+    while IFS= read -r line; do
+      read -r name _ <<< "$line"; [ -n "$name" ] && prune_results builds "$name"
+    done < <(read_builds)
   fi
-  # 漏洞库：第一个镜像扫描时更新一次，其余镜像跳过更新
-  DB_FLAG=""; [ "$SKIP_DB" -eq 1 ] && DB_FLAG="--skip-db-update"
+elif [ "$HAVE_BUILDS" = 0 ] && [ "$DO_IMAGES" = 1 ]; then
+  log_info "no config/builds.conf: source builds skipped"
+fi
+
+if [ "$DO_IMAGES" = 1 ]; then
+  log_info "===== STEP 3/3: images (platform=$IMAGE_PLATFORM) ====="
+  mkdir -p "$IMG_RESULTS"
 
   while IFS= read -r line <&3; do
     read -r name image src rest <<< "$line"
@@ -321,7 +459,13 @@ if [ "$DO_IMAGES" = 1 ]; then
     done < <(read_images)
   fi
 
-  "$PYTHON" "$IMG_PY" summary --conf "$CONF_DIR/images.conf" --results "$IMG_RESULTS" --targets "$IMAGES_TSV" \
+fi
+
+if [ "$DO_IMAGES" = 1 ] || [ "$DO_BUILDS" = 1 ]; then
+  SUM_ARGS=(--results "$IMG_RESULTS")   # 路径可能含空格（如 /Volumes/My Files），用数组传参
+  [ -f "$CONF_DIR/images.conf" ] && SUM_ARGS+=(--conf "$CONF_DIR/images.conf")
+  [ "$HAVE_BUILDS" = 1 ] && SUM_ARGS+=(--builds-conf "$CONF_DIR/builds.conf" --builds-results "$BUILD_RESULTS")
+  "$PYTHON" "$IMG_PY" summary "${SUM_ARGS[@]}" --targets "$IMAGES_TSV" \
       --run-id "$RUN_ID" --platform "$IMAGE_PLATFORM" --recent-days "$RECENT_DAYS" --go-days "$GO_OFFICIAL_DAYS" --out "$IMAGE_REPORT" >>"$RUN_LOG" 2>&1 \
     && log_info "image report written: $IMAGE_REPORT" \
     || alert WARN "could not write image report $IMAGE_REPORT"
@@ -339,8 +483,8 @@ if [ "$DO_BRANCHES" = 1 ]; then
   done 6< "$TARGETS_TSV"
   echo
 fi
-if [ "$DO_IMAGES" = 1 ]; then
-  echo "镜像                 状态          漏洞数"
+if [ "$DO_IMAGES" = 1 ] || [ "$DO_BUILDS" = 1 ]; then
+  echo "镜像/源码构建        状态          漏洞数"
   while IFS=$'\t' read -r n s i <&6; do
     printf '%-20s %-13s %s\n' "$n" "$s" "$i"
   done 6< "$IMAGES_TSV"
@@ -350,7 +494,7 @@ echo "本次告警: $((N_ERROR+N_WARN)) 条（错误 ${N_ERROR} / 警告 ${N_WAR
 echo "完整日志: $RUN_LOG"
 echo "告警汇总: $LOG_DIR/alerts.log"
 [ "$DO_BRANCHES" = 1 ] && echo "分支报告: $BRANCH_REPORT"
-[ "$DO_IMAGES" = 1 ]   && echo "镜像报告: $IMAGE_REPORT"
+{ [ "$DO_IMAGES" = 1 ] || [ "$DO_BUILDS" = 1 ]; } && echo "镜像报告: $IMAGE_REPORT"
 FINISHED=1
 [ "$N_ERROR" -gt 0 ] && exit 1
 exit 0
