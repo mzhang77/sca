@@ -229,12 +229,17 @@ run_it_all --no-sync
 check "已挂载（/）：正常运行" '[ $RC -eq 0 ]'
 cp "$T/settings.keep" "$R/config/settings.env"
 
-echo "== 13. cleanup.sh：删除分支和项目内 Go 缓存，不动结果，也不碰 Go 全局缓存"
-mkdir -p "$R/caches/go-mod/m/x" "$R/caches/go-build/aa" "$T/globalcache/k"; chmod 555 "$R/caches/go-mod/m/x"
+echo "== 13. cleanup.sh：删除分支、源码构建残留和项目内 Go 缓存，不动结果和 state 里的其他东西，也不碰 Go 全局缓存"
+mkdir -p "$R/caches/go-mod/m/x" "$R/caches/go-build/aa" "$T/globalcache/k" "$R/state/build/demobuild"; chmod 555 "$R/caches/go-mod/m/x"
+: > "$R/state/build/demobuild/bin-a"; echo '{}' > "$R/state/kev.json"
 "$R/bin/cleanup.sh" --dry-run > "$T/out.txt" 2>&1
-check "--dry-run 不删除，列出项目内缓存" '[ -n "$(ls -A "$R/repos")" ] && [ -d "$R/caches/go-mod/m/x" ] && grep -q "$R/caches/go-mod" "$T/out.txt"'
+check "--dry-run 不删除，列出项目内缓存和源码构建残留" '[ -n "$(ls -A "$R/repos")" ] && [ -d "$R/caches/go-mod/m/x" ] && grep -q "$R/caches/go-mod" "$T/out.txt" && grep -q "state/build/demobuild" "$T/out.txt" && [ -f "$R/state/build/demobuild/bin-a" ]'
+"$R/bin/cleanup.sh" --git-only -y > "$T/out.txt" 2>&1
+check "--git-only：不动源码构建残留" '[ -f "$R/state/build/demobuild/bin-a" ]'
+"$R/bin/run.sh" --branches-only --only demo > /dev/null 2>&1   # 重新建分支，供下面的完整清理检查
 GOCACHE="$T/globalcache" "$R/bin/cleanup.sh" -y > "$T/out.txt" 2>&1; RC=$?
 check "-y：分支和项目缓存清空，results 和全局缓存都还在" '[ $RC -eq 0 ] && [ -z "$(ls -A "$R/repos")" ] && [ -z "$(ls -A "$R/worktrees")" ] && [ -d "$R/caches/go-mod" ] && [ -z "$(ls -A "$R/caches/go-mod")" ] && [ -z "$(ls -A "$R/caches/go-build")" ] && [ -d "$T/globalcache/k" ] && [ -s "$SUM" ]'
+check "-y：源码构建残留删除，state 里其他文件保留" '[ ! -e "$R/state/build/demobuild" ] && [ -f "$R/state/kev.json" ] && [ -f "$R/state/last_run.json" ]'
 
 echo
 echo "结果: $PASS 通过, $FAILN 失败"

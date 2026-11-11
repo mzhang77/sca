@@ -39,7 +39,7 @@ bin/run.sh --branches-only    # 只做第 1 步（排查用）
 bin/run.sh --images-only      # 只做第 2、3 步，用 worktree 现有内容（排查用）
 bin/run.sh --no-builds        # 跳过第 2 步（源码构建）
 tail -f logs/alerts.log       # 只看错误和警告
-bin/cleanup.sh                # 删除本地所有分支（repos/ worktrees/）并清空本项目的 Go 缓存（caches/）；--dry-run 只看不删，-y 不询问
+bin/cleanup.sh                # 删除本地所有分支（repos/ worktrees/）、源码构建残留（state/build/），清空本项目的 Go 缓存（caches/，含编译缓存和自动下载的 Go 工具链）；--dry-run 只看不删，-y 不询问
 ```
 退出码：0 = 全部成功；1 = 有失败；2 = 前置条件不满足；3 = 已有实例在运行。
 
