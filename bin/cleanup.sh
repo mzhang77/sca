@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# cleanup.sh - 释放磁盘空间：删除下载到本地的所有 GitHub 分支（repos/ 和 worktrees/）、源码构建留下的临时二进制，
-#              并清空本项目的 Go 缓存。
+# cleanup.sh - 释放磁盘空间：删除下载到本地的所有 GitHub 分支（repos/ 和 worktrees/）、源码构建留下的临时二进制、
+#              cve_check.py 留下的临时 worktree，并清空本项目的 Go 缓存。
 #
 # 用法：bin/cleanup.sh [-y] [--dry-run] [--git-only | --go-only]
 #   -y, --yes      不询问，直接删除
 #   --dry-run      只列出将要删除的内容，不删除
-#   --git-only     只删除 repos/ 和 worktrees/
+#   --git-only     只删除 repos/、worktrees/ 和 state/cve_check/
 #   --go-only      只清空 Go 缓存
 # 删除的内容（不加 --git-only / --go-only 时三项都删）：
 #   repos/*        bare + blobless 仓库（含 origin/<分支> 和本地 sca/<分支>）
 #   worktrees/*    每个分支的 worktree
+#   state/cve_check/*  cve_check.py 的临时 worktree。正常扫完就删，运行中断时会留下（下次运行 cve_check.py 开始时也会清掉）
 #   state/build/*  源码构建（config/builds.conf）编出的二进制。正常扫完就删，运行中断或 BUILD_KEEP_BINARIES=1 时会留下
 #   Go 缓存        settings.env 的 GO_BUILD_CACHE / GO_MOD_CACHE（默认 caches/go-build、caches/go-mod）；
 #                  只清本项目自己的缓存，不碰 Go 的全局缓存。某项设成空字符串时跳过它。
 #                  源码构建的编译缓存和自动下载的 Go 工具链（GOTOOLCHAIN）也在这里，通常是占空间最多的部分。
-# 不动：results/ logs/ config/，以及 state/ 里除 build/ 以外的内容（last_run.json、KEV 缓存等）；Trivy 的漏洞库（在 Trivy 自己的缓存目录）。
+# 不动：results/ logs/ config/，以及 state/ 里除 build/、cve_check/ 以外的内容（last_run.json、KEV 缓存等）；Trivy 的漏洞库（在 Trivy 自己的缓存目录）。
 # 下次 run.sh 会重新 fetch 全部分支、重新下载 Go 模块和工具链（首次 TiDB/TiKV 较慢）。
 # 退出码：0 = 完成；1 = 有删除失败；2 = 参数错误或用户取消；3 = 有扫描正在运行
 
@@ -28,7 +29,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift;;
     --git-only) DO_GO=0; DO_BUILD=0; shift;;
     --go-only) DO_GIT=0; DO_BUILD=0; shift;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
@@ -82,7 +83,7 @@ echo "SCA 清理（${SCA_ROOT}）"
 TARGETS=""; BT=""
 if [ "$DO_GIT" = 1 ]; then
   echo "本地 GitHub 分支："
-  for d in "$REPOS_DIR"/* "$WT_DIR"/*; do
+  for d in "$REPOS_DIR"/* "$WT_DIR"/* "$STATE_DIR/cve_check"; do
     [ -e "$d" ] || continue
     echo "  - ${d#$SCA_ROOT/}"
     TARGETS=1
@@ -131,7 +132,7 @@ wipe() {  # path  [contents-only]
 
 if [ "$DO_GIT" = 1 ]; then
   echo "删除本地分支…"
-  for d in "$WT_DIR"/* "$REPOS_DIR"/*; do
+  for d in "$WT_DIR"/* "$STATE_DIR/cve_check" "$REPOS_DIR"/*; do
     [ -e "$d" ] || continue
     wipe "$d"
   done

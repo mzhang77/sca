@@ -39,7 +39,7 @@ bin/run.sh --branches-only    # 只做第 1 步（排查用）
 bin/run.sh --images-only      # 只做第 2、3 步，用 worktree 现有内容（排查用）
 bin/run.sh --no-builds        # 跳过第 2 步（源码构建）
 tail -f logs/alerts.log       # 只看错误和警告
-bin/cleanup.sh                # 删除本地所有分支（repos/ worktrees/）、源码构建残留（state/build/），清空本项目的 Go 缓存（caches/，含编译缓存和自动下载的 Go 工具链）；--dry-run 只看不删，-y 不询问
+bin/cleanup.sh                # 删除本地所有分支（repos/ worktrees/）、源码构建残留（state/build/）、cve_check.py 的临时 worktree（state/cve_check/），清空本项目的 Go 缓存（caches/，含编译缓存和自动下载的 Go 工具链）；--dry-run 只看不删，-y 不询问
 ```
 退出码：0 = 全部成功；1 = 有失败；2 = 前置条件不满足；3 = 已有实例在运行。
 
@@ -74,7 +74,7 @@ repos/<owner>__<repo>.git        bare + blobless 仓库，只 fetch 被跟踪的
 worktrees/<owner>__<repo>/<分支>/  每个分支一个 worktree（本地分支 sca/<分支>）
 caches/go-build  caches/go-mod   本项目的 Go 编译缓存和模块缓存（go 第一次用到时自动创建）
 results/  logs/  state/          结果 / 日志 / last_run.json 与 KEV 缓存；state/build/ 是源码构建的临时目录（扫完即删）
-tests/                  test_sca.py（单元）  test_image_view.py（镜像，桩 trivy）  test_cve_check.py（客户 CVE 核对）  e2e.sh（本地假 origin + 桩扫描器，不联网）
+tests/                  test_sca.py（单元）  test_image_view.py（镜像，桩 trivy）  test_cve_check.py（客户 CVE 核对，桩 osv-scanner）  e2e.sh（本地假 origin + 桩扫描器，不联网）
 ```
 
 ## 旧记录清理（RETENTION，默认 10）
@@ -125,22 +125,33 @@ tests/                  test_sca.py（单元）  test_image_view.py（镜像，�
 - 已知限制：只覆盖编出来的 Go 二进制。镜像里直接复制进来的其他东西不在内，比如 tidb-backup-manager 镜像里的 `tidb-lightning`、`dumpling`（来自 `pingcap/tidb-lightning`、`pingcap/dumpling` 镜像）和它的专用基础镜像；需要的话把这些镜像加进 images.conf。
 
 ## 核对客户提交的 CVE（bin/cve_check.py）
-客户报来一批 CVE 时，拿它们对照 `results/` 里各组件**最新一次**的结果，列出哪些还没解决、在哪些组件里、要升级哪些依赖。不重新扫描，先跑一次 `bin/run.sh` 保证结果是新的。
+客户报来一批 CVE 时，现场扫描客户分支（和 master），报告每个 CVE 在两个分支上是否已解决、在哪个依赖包里、要升到哪个版本。
+只扫分支源码（OSV-Scanner，和 `bin/run.sh` 第 1 步同样的扫描和 `EXCLUDE_PATH_REGEX` 排除规则），不扫镜像，不做源码构建。
+**每次运行都重新 fetch、重新扫描，不读 `results/` 里以前的任何结果**，也不需要先跑 `bin/run.sh`。
 ```
-bin/cve_check.py 客户目录/cves.txt                 # 自动读取同目录的 cve_check.conf
-bin/cve_check.py cves.txt --config x.conf --out y.md
+bin/cve_check.py 客户目录/cves.txt --repo tidb --branch release-8.5-客户 --base master   # 两个分支对比
+bin/cve_check.py 客户目录/cves.txt --repo tidb --branch release-8.5-客户                 # 只看客户分支
+bin/cve_check.py 客户目录/cves.txt                                                       # 目标写在同目录 cve_check.conf 的 target 行里（可以多个仓库）
 ```
+- **`--repo`**：`config/branches.conf` 里的名称（用它的仓库 URL），或者直接写仓库 URL（不用加进 branches.conf）。
 - **CVE 清单**：纯文本，一行一个编号（CVE-/GHSA-/GO-，大小写都行）；`#` 开头的行和空行忽略，编号后面可以写注释。不是编号的行会跳过并在报告开头提示。
-- **配置**（见 `config/cve_check.conf.example`）：`components` 要看的组件（images.conf / builds.conf / branches.conf 的名称），`exclude` 不再列出的 CVE 和原因。
-- **输出**：`results/cve-check-<清单名>.md`（清单文件叫 cves.txt 时用目录名）和同名 `.tsv`（逐个 CVE：结论、组件、依赖包、升级到，方便贴回客户的表格）。
-- 每个 CVE 的结论：
-  - **未解决-交付物**：在镜像或源码构建的最新结果里（非 OS 包）。报告按组件列出依赖包、当前版本、升级到哪个版本、怎么处理（镜像的源码已修复 = 发新镜像；否则在分支上升级依赖），再按依赖包跨组件合并一次。只有分支结果、没有扫镜像或源码构建的组件（如 ng-monitoring），它的分支命中也列在这一节（类型写“分支”，版本是分支源码清单里的）。
-  - **未解决-仅分支**：只在分支的源码清单里（go.mod、lock 文件），我们扫的二进制里没有。单独一节。
-  - **已解决**：所选组件以前的扫描里出现过，最新结果里没有了。只列编号。
-  - **仅 OS 包**：只在镜像的 OS 包里出现过。客户自己 build 镜像，不考虑。
-  - **从未扫到**：所选组件的任何一次扫描（`RETENTION` 保留的范围内）里都没有。可能在没选、没扫的组件或镜像里（如 tidb-backup-manager 镜像里直接复制进来的 tidb-lightning、dumpling），或者扫描器的库没收录，需要问客户。
-  - **排除**：配置里 `exclude` 的。
-- 测试：`python3 tests/test_cve_check.py`。
+- **配置**（见 `config/cve_check.conf.example`）：不指定时依次找清单同目录的 `cve_check.conf`、`config/cve_check.conf`。每个客户一份，和客户的 CVE 清单放在一起（客户分支、排除的 CVE 都是客户自己的）。
+  - `target 名称或仓库URL 客户分支 [master分支]`：要扫的仓库和分支，可以写多行；命令行给了 `--repo` 时忽略。
+    没写 master 分支的行（如 tidb-operator 只有 release-1.6）：客户分支和 master 是同一个，两边都用它（只扫一次），这个仓库的 CVE 只会是“都未解决”或“都已解决”。所有行都没写 master 分支时，只报告客户分支。
+  - `exclude CVE编号 [原因]`：不参与判断的 CVE，报告里单独列出原因。
+  - 旧配置里的 `components` 行不再使用，会被忽略（报告开头提示）。
+- **结论**：每个 CVE 按 **仓库 + 依赖包** 分别判断。比如同一个 CVE 在 ticdc 的 master 上已经修了、tidb-operator 上还没修，ticdc 那一行算“master已解决-分支未解决”，tidb-operator 那一行算“都未解决”；所以同一个 CVE 可能出现在几个类别里，`report.tsv` 的“结论”列用 ` / ` 列出所有类别，“涉及的仓库”列写明每个仓库各是哪一类。
+  - 两个分支：**master已解决-分支未解决**（要把 master 的升级合到客户分支）/ **都未解决** / **master未解决-分支已解决** / **都已解决**
+  - 一个分支：**分支未解决** / **分支已解决**
+  - “master已解决”指 master 上这个包已经不受影响；**都已解决** 指所有仓库的两个分支都没扫到。另有 **排除**。“已解决”指这次没扫到，包括从来没受影响的（CVE 属于 OS 包、别的组件，或扫描器的库没收录），报告里只列编号。
+  - 每一节按 目标 / 依赖包 列出客户分支和 master 上的版本（受影响的标“受影响”，没受影响的也列出实际版本，没有这个依赖写“无此依赖”）和修复版本。
+    “分支未解决”的那一节（两个分支时是“master已解决-分支未解决”）另外按依赖包跨目标合并一次。
+- **输出**：`results/cve-check/<清单名>/<运行ID>/`（清单文件叫 cves.txt 时用目录名）：`report.md`、`report.tsv`（逐个 CVE：结论、客户分支 / master 中的包和版本、修复版本、排除原因，方便贴回客户的表格）、`run.log`，
+  以及 `scans/<目标>/<分支>/` 下每个分支的 `osv.json`、`report.{json,md,tsv}`。`latest` 指向最近一次；保留最近 `RETENTION` 次。`--out 路径.md` 另外复制一份报告和同名 `.tsv`。
+- **git**：和 `bin/run.sh` 共用 `repos/` 里的 bare 仓库（只是 git 缓存），分支 fetch 到单独的 `refs/cve-check/*`，在 `state/cve_check/` 建临时 worktree，扫完删除；不碰 `worktrees/` 和 run.sh 用的 refs。
+  和 `bin/run.sh` 共用单实例锁：一方在运行时另一方直接退出（退出码 3）。
+- **失败**：某个分支 fetch / 扫描失败时，报告开头标出，结论里不含这个分支，退出码 1。
+- 测试：`python3 tests/test_cve_check.py`（本地假 origin + 桩 osv-scanner，不联网）。
 
 ## License
 MIT，见 [LICENSE](LICENSE)。
