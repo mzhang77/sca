@@ -8,7 +8,5 @@ tikv             https://github.com/tikv/tikv.git                 release-8.5
 pd               https://github.com/tikv/pd.git                   release-8.5
 ticdc            https://github.com/pingcap/ticdc.git             release-8.5
 tidb-operator    https://github.com/pingcap/tidb-operator.git     release-1.6
-kvproto          https://github.com/pingcap/kvproto.git           release-8.5
 tidb-dashboard   https://github.com/pingcap/tidb-dashboard.git    release-8.5
 ng-monitoring    https://github.com/pingcap/ng-monitoring.git     release-8.5
-client-go        https://github.com/tikv/client-go.git            tidb-8.5

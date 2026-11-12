@@ -20,7 +20,7 @@
    ```
    `settings.env` 可以不建，没有时全部用默认值（和 example 里的值相同，只有 `EXTRA_PATH` 默认为空）。常用的本机设置：工具装在非标准位置时加 `EXTRA_PATH`；
    项目放在外置盘上时设 `REQUIRED_MOUNT`（未挂载就不运行）。
-3. `bin/check_env.sh` 检查工具和配置是否齐全，然后先用最小的仓库试跑：`bin/run.sh --only kvproto`。
+3. `bin/check_env.sh` 检查工具和配置是否齐全，然后先用最小的仓库试跑：`bin/run.sh --only ng-monitoring`。
 
 `repos/ worktrees/ caches/ results/ logs/ state/` 都是运行时自动创建的，不进 git（见 `.gitignore`）。
 Go 缓存默认放在项目里的 `caches/go-build`、`caches/go-mod`，只在 SCA 运行时生效，不影响你机器上其他 Go 项目（可用 settings.env 的 `GO_BUILD_CACHE` / `GO_MOD_CACHE` 改位置）。首次运行要完整下载各仓库，TiDB / TiKV 较慢（`CLONE_TIMEOUT` 默认 1 小时）。
@@ -31,7 +31,7 @@ macOS 和 Linux 都可以运行（脚本保持 bash 3.2 兼容）；防睡眠用
 bin/check_env.sh              # 检查工具是否齐全（只检查，缺什么会告诉你怎么装）
 bin/check_env.sh --selftest   # 装好 osv-scanner 后，用一个小 go.mod 验证输出格式能被解析
 bin/run.sh                    # 先跑全部分支，再做源码构建、扫全部镜像，出两份报告
-bin/run.sh --only kvproto     # 只跑一个分支（以及以它为源码的源码构建和镜像）；也可以写镜像名或源码构建名，如 --only br、--only tidb-dashboard
+bin/run.sh --only ng-monitoring # 只跑一个分支（以及以它为源码的源码构建和镜像）；也可以写镜像名或源码构建名，如 --only br、--only tidb-dashboard
 bin/run.sh --no-sync          # 不 fetch（快速试跑）
 bin/run.sh --govulncheck      # 本次打开 Go 可达性分析（缺省关闭，见下）
 bin/run.sh --skip-db-update   # 不更新 Trivy 漏洞库
@@ -94,7 +94,7 @@ tests/                  test_sca.py（单元）  test_image_view.py（镜像，�
 - 扫描范围是仓库内所有被 OSV-Scanner 识别的清单（go.mod、Cargo.lock、npm 锁文件等），按 `EXCLUDE_PATH_REGEX` 排除不会编进交付二进制的清单（测试模块 tests/、integration_tests/，示例 examples/，以及 node_modules/testdata/third_party）。目的是让分支报告接近“这个分支 build 出的镜像会被扫出什么”；分支和已发布的镜像不一致是正常的（镜像可能是旧 build），两边都不一定是错；`dev` 依赖组默认忽略（若 OSV 输出携带依赖组）。
 - govulncheck 需要能编译这些仓库：首次会下载 Go 模块并可能切换 Go 工具链（TiDB 较慢）；用较旧 Go 编译的 govulncheck 可能解析不了新版 Go 的代码，此时只会产生 WARN，可达性为 unknown。
 - stdlib 的漏洞按 go.mod 的 `go` 指令版本匹配 OSV，可达性按实际工具链版本匹配 govulncheck，两者可能不同。
-- kvproto 这类被 TiDB/TiKV 引用的库，最终生效的依赖版本由消费方的 go.mod / Cargo.lock 决定，其结果更多反映"该分支自己声明的依赖偏旧"。
+- kvproto、client-go 是被 TiDB/TiKV/PD 等组件引用的库，实际编进二进制的版本由消费方的 go.mod / Cargo.lock 决定，已随这些组件一起扫描，所以不单独跟踪。
 
 ## 镜像报告（客户视角，bin/run.sh 第 3 步）
 客户的商业扫描器扫的是交付的镜像，不是源码。`bin/run.sh` 在更新完分支后用 Trivy 扫 `config/images.conf` 里的镜像（默认 linux/amd64），
