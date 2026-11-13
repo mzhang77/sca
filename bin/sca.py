@@ -189,6 +189,67 @@ def fix_version(vulns, eco, name, cur):
     return (min(cands, key=vkey) if cands else None), bool(pool)
 
 
+def affected_ranges(vulns, name):
+    """OSV 里这个包的受影响区间 [[introduced, fixed 或 "", last_affected 或 ""], ...]。
+    同一个漏洞可能有好几段（例如 <1.82.2 和 [1.83.0, 1.83.2)），只看"下一个 fixed"会挑到另一段里的版本。"""
+    out = []
+    for v in vulns:
+        for aff in v.get("affected") or []:
+            if str((aff.get("package") or {}).get("name", "")).lower() != name.lower():
+                continue
+            for r in aff.get("ranges") or []:
+                if r.get("type") not in ("SEMVER", "ECOSYSTEM"):
+                    continue
+                cur = None
+                for ev in r.get("events") or []:
+                    if "introduced" in ev:
+                        if cur is not None:
+                            out.append(cur)
+                        cur = [norm_ver(ev["introduced"]), "", ""]
+                    elif cur is not None and ("fixed" in ev or "last_affected" in ev):
+                        if "fixed" in ev:
+                            cur[1] = norm_ver(ev["fixed"])
+                        else:
+                            cur[2] = norm_ver(ev["last_affected"])
+                        out.append(cur)
+                        cur = None
+                if cur is not None:
+                    out.append(cur)
+    return [list(x) for x in dict.fromkeys(tuple(x) for x in out)]
+
+
+def in_ranges(ver, ranges):
+    k = vkey(ver)
+    for intro, fixed, last in ranges:
+        if intro not in ("", "0") and k < vkey(intro):
+            continue
+        if fixed and k >= vkey(fixed):
+            continue
+        if last and k > vkey(last):
+            continue
+        return True
+    return False
+
+
+def safe_fix(issues):
+    """几个漏洞一起修时建议升级到的版本：不低于每个漏洞各自的修复版本、且不落在任何一个漏洞受影响区间里的最低版本。
+    issues: [{"fix": str, "ranges": [...]}]。没有 ranges（旧数据）时退回取最高。"""
+    fixes = [norm_ver(i.get("fix")) for i in issues if i.get("fix")]
+    if not fixes:
+        return None
+    floor = max(fixes, key=vkey)
+    ranges = [r for i in issues if i.get("fix") for r in (i.get("ranges") or [])]   # 无修复的漏洞单独提示，不参与
+    if not ranges:
+        return floor
+    cands = {floor} | {r[1] for r in ranges if r[1]}
+    # 预发布 / 伪版本（如 1.84.0-dev.0.2026...）不拿来当建议版本
+    cands = sorted((c for c in cands if c == floor or (vkey(c) > vkey(floor) and vkey(c)[1] == 1)), key=vkey)
+    for c in cands:
+        if not in_ranges(c, ranges):
+            return c
+    return floor
+
+
 def package_issues(pe, eco, name, ver, kev, ran, reach):
     vulns = [v for v in (pe.get("vulnerabilities") or []) if v.get("id")]
     uf = {}
@@ -251,7 +312,7 @@ def package_issues(pe, eco, name, ver, kev, ran, reach):
             "score": score, "severity": label,
             "kev": (None if kev is None else bool(kev_hit)), "kev_cves": kev_hit,
             "reach": lookup_reach(eco, name, ver, ids, ran, reach),
-            "fix": fix, "no_fix_info": not has_fix_info,
+            "fix": fix, "no_fix_info": not has_fix_info, "ranges": affected_ranges(gv, name),
             "published": min((str(v.get("published") or "")[:10] for v in gv if v.get("published")), default=""),
         })
     return out
@@ -300,7 +361,7 @@ def cmd_report(a):
         reach_best = max((i["reach"] for i in iss), key=lambda r: REACH_RANK.get(r, 0))
         rows.append({
             "package": name, "ecosystem": eco, "version": ver,
-            "fix_to": max(fixes, key=vkey) if fixes else None,
+            "fix_to": safe_fix(iss) if fixes else None,
             "unfixed": sum(1 for i in iss if i.get("no_fix_info")),
             "issue_count": len(iss),
             "cves": sorted(c for i in iss for c in i["cves"]),

@@ -30,6 +30,30 @@ class Basics(unittest.TestCase):
         self.assertIsNone(sca.cvss3_score("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"))
 
 
+class SafeFix(unittest.TestCase):
+    """CVE 有多段受影响区间时（grpc CVE-2026-84445：<1.82.2 和 [1.83.0, 1.83.2)），合并建议版本不能落在另一段里"""
+    V1 = {"id": "GO-A", "affected": [{"package": {"name": "google.golang.org/grpc"},
+          "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.83.1"}]}]}]}
+    V2 = {"id": "GO-B", "affected": [{"package": {"name": "google.golang.org/grpc"},
+          "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.82.2"}, {"introduced": "1.83.0"},
+                                                   {"fixed": "1.83.2"}, {"introduced": "1.84.0-dev"},
+                                                   {"fixed": "1.84.0-dev.0.20260825144003-d5a41119e0e3"}]}]}]}
+
+    def iss(self, v, cur):
+        fx, _ = sca.fix_version([v], "Go", "google.golang.org/grpc", cur)
+        return {"fix": fx, "ranges": sca.affected_ranges([v], "google.golang.org/grpc")}
+
+    def test_multi_range(self):
+        for cur in ("1.79.3", "1.82.1", "1.83.1"):
+            got = sca.safe_fix([self.iss(self.V1, cur), self.iss(self.V2, cur)] if cur != "1.83.1" else [self.iss(self.V2, cur)])
+            self.assertEqual(got, "1.83.2", cur)
+
+    def test_single_and_legacy(self):
+        self.assertEqual(sca.safe_fix([self.iss(self.V2, "1.79.3")]), "1.82.2")
+        self.assertEqual(sca.safe_fix([{"fix": "1.2.0"}, {"fix": "1.10.0"}]), "1.10.0")   # 旧数据没有 ranges：取最高
+        self.assertIsNone(sca.safe_fix([{"fix": None}]))
+
+
 class Report(unittest.TestCase):
     def setUp(self):
         self.t = tempfile.mkdtemp()

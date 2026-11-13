@@ -41,7 +41,7 @@ import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sca import vkey, norm_ver, load_json, SEV_RANK  # noqa: E402
+from sca import vkey, norm_ver, load_json, safe_fix, SEV_RANK  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ID_RE = re.compile(r"^(CVE-\d{4}-\d{4,}|GHSA(-[0-9a-z]{4}){3}|GO-\d{4}-\d{4,})$", re.I)
@@ -358,7 +358,8 @@ class Scanner:
             rep = load_json(os.path.join(out, "report.json"))
             for i in rep.get("issues", []):
                 h = {"pkg": i["package"], "eco": i.get("ecosystem", ""), "ver": norm_ver(i.get("version", "")),
-                     "fix": norm_ver(i.get("fix") or ""), "sev": i.get("severity", "UNKNOWN")}
+                     "fix": norm_ver(i.get("fix") or ""), "ranges": i.get("ranges") or [],
+                     "sev": i.get("severity", "UNKNOWN")}
                 for x in {norm_id(x) for x in (i.get("ids") or []) + (i.get("cves") or []) + [i.get("id", "")] if x}:
                     r["hits"].setdefault(x, []).append(h)
             r["ok"] = True
@@ -407,11 +408,6 @@ def classify(ids, excl, targets, compare):
     return res
 
 
-def max_ver(vs):
-    vs = [v for v in vs if v]
-    return max(vs, key=vkey) if vs else ""
-
-
 def sev_max(a, b):
     return a if SEV_RANK.get(a, 0) >= SEV_RANK.get(b, 0) else b
 
@@ -445,11 +441,13 @@ def rows_for(cves, targets, compare, cat):
                 mc = ("同一分支" if t.get("same") else side_cell(t["base"], c, eco, pkg)) if compare else ""
                 k = (t["name"], eco, pkg, bc, mc)
                 r = g.setdefault(k, {"target": t["name"], "eco": eco, "pkg": pkg, "br": bc, "base": mc,
-                                     "fix": "", "sev": "UNKNOWN", "ids": set()})
+                                     "fix": "", "sev": "UNKNOWN", "ids": set(), "hits": []})
                 for h in hits:
                     if h["eco"] == eco and h["pkg"] == pkg:
-                        r["fix"] = max_ver([r["fix"], h["fix"]])
+                        r["hits"].append(h)
                         r["sev"] = sev_max(r["sev"], h["sev"])
+                # 几个 CVE 合在一行时不能简单取最高：CVE 可能有多段受影响区间，最高的那个修复版本可能正落在另一个 CVE 的区间里
+                r["fix"] = safe_fix(r["hits"]) or ""
                 r["ids"].add(c)
     order = [t["name"] for t in targets]
     return sorted(g.values(), key=lambda r: (order.index(r["target"]), -SEV_RANK.get(r["sev"], 0), r["pkg"]))
@@ -556,13 +554,14 @@ def render(a, ids, bad, targets, compare, excl, res, ignored):
         if cat in (C_BACKPORT, C_OPEN) and rs:
             bypkg = {}
             for r in rs:
-                x = bypkg.setdefault((r["eco"], r["pkg"]), {"fix": "", "ids": set(), "sev": "UNKNOWN", "where": []})
-                x["fix"] = max_ver([x["fix"], r["fix"]])
+                x = bypkg.setdefault((r["eco"], r["pkg"]), {"fix": "", "ids": set(), "sev": "UNKNOWN", "where": [], "hits": []})
+                x["hits"] += r["hits"]
+                x["fix"] = safe_fix(x["hits"]) or ""
                 x["sev"] = sev_max(x["sev"], r["sev"])
                 x["ids"] |= r["ids"]
                 x["where"].append("%s %s" % (r["target"], r["br"].replace("（受影响）", "")))
             L.append("\n按依赖包合并（跨目标）：\n")
-            L.append(md_table(["依赖包", "修复版本（最高）", "最高严重程度", "客户分支里的版本", "CVE"],
+            L.append(md_table(["依赖包", "修复版本（全部 CVE 都修复）", "最高严重程度", "客户分支里的版本", "CVE"],
                               [[k[1], x["fix"] or "无修复版本", x["sev"], "<br>".join(sorted(set(x["where"]))), ids_cell(x["ids"])]
                                for k, x in sorted(bypkg.items(), key=lambda kv: (-SEV_RANK.get(kv[1]["sev"], 0), kv[0][1]))]))
 
@@ -580,7 +579,7 @@ def render(a, ids, bad, targets, compare, excl, res, ignored):
     L.append("\n## 附录：逐个 CVE\n")
     tsv = []
     for c in ids:
-        fx = max_ver([h["fix"] for t in targets for s in (t["br"], t["base"]) if s and s["ok"] for h in s["hits"].get(c, [])])
+        fx = safe_fix([h for t in targets for s in (t["br"], t["base"]) if s and s["ok"] for h in s["hits"].get(c, [])]) or ""
         r = res[c]
         per = "; ".join("%s: %s" % x for x in r["per"]) if len(r["cats"]) > 1 else ", ".join(dict.fromkeys(x[0] for x in r["per"]))
         row = [c, " / ".join(r["cats"]), per or "-", where(c, targets, "br") or "-"]
